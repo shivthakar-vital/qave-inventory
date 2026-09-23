@@ -8,7 +8,8 @@ so several people can use the app at once and anyone can view the data in the br
 
 ## Features
 
-- Add, check out, restock/return, edit, and remove items (double-click a row to check out)
+- Add, check out, restock/return, edit, and remove items. Double-click a row to check it
+  out, or to open its serial numbers / batches
 - **Item types** (Test Bench, TBox, Instruments, Cables, Disc, …) decide how an item is
   tracked: by **serial number**, in **batches**, or by **count**. Add new types from the
   Type dropdown with **+ New type…**

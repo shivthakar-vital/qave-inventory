@@ -766,7 +766,7 @@ class InventoryApp(QMainWindow):
         self.table.setShowGrid(False)
         self.table.setWordWrap(False)
         self.table.setFocusPolicy(Qt.ClickFocus)
-        self.table.doubleClicked.connect(self._checkout)
+        self.table.doubleClicked.connect(self._on_double_click)
         self.table.itemSelectionChanged.connect(self._update_buttons)
         for key in (Qt.Key_Delete, Qt.Key_Backspace):
             QShortcut(QKeySequence(key), self.table, self._remove, context=Qt.WidgetShortcut)
@@ -781,7 +781,7 @@ class InventoryApp(QMainWindow):
         self.btn_units    = QPushButton("Serial numbers…")
         self.btn_remove   = QPushButton("Remove")
         self.btn_remove.setObjectName("removeBtn")
-        self.btn_checkout.setToolTip("Tip: double-click a row to check it out")
+        self.btn_checkout.setToolTip("Tip: double-click a counted item to check it out")
         self.btn_edit.setToolTip("Change the item's name or type")
         self.btn_checkout.clicked.connect(self._checkout)
         self.btn_restock.clicked.connect(self._restock)
@@ -1122,6 +1122,14 @@ class InventoryApp(QMainWindow):
             self.name_input.clear()
             self.qty_input.setValue(1)
             self.name_input.setFocus()
+
+    def _on_double_click(self):
+        """Serial / batch items open their list; counted items go straight to check out."""
+        it = self._selected_item()
+        if it and self._mode(it) != "count":
+            self._open_units_for(it["id"])
+        elif it:
+            self._checkout()
 
     def _open_units(self):
         it = self._selected_item()
