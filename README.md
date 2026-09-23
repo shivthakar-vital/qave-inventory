@@ -19,7 +19,11 @@ so several people can use the app at once and anyone can view the data in the br
 - **Orders**: record what's been ordered (quantity, where to order it, and a note), see
   everything on order, and mark orders received to add the stock automatically
 - Low-stock and out-of-stock highlighting, with an adjustable alert level
-- Search box, plus a "Last change" column showing who changed each item and when
+- **Sorting and filters on every table**: click a column header to sort, and click again
+  to reverse. The main list filters by type and by status (low stock, out of stock, on
+  order, on loan). The Serial numbers, Batches, and Orders windows have search boxes and
+  filters too
+- A "Last change" column showing who changed each item and when
 - **Google Sheets sync**: the sheet acts as the database. The app pulls changes every
   minute (or when you click **↻ Sync**), and every change is written straight to the sheet
 - A **Log** tab in the sheet records every change: time, person, action, and amount

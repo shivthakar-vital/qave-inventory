@@ -12,7 +12,7 @@ Build a double-clickable app:
     ./build_mac.sh
 """
 
-import sys
+import re, sys
 from collections import Counter
 from datetime import datetime
 
@@ -28,7 +28,7 @@ from PyQt5.QtGui import QFont, QColor, QPalette, QKeySequence, QDesktopServices
 import inventory_store as store
 
 APP_TITLE   = "Qave Inventory"
-APP_VERSION = "1.0.3"         # bump this for each release, then push a matching tag (v1.0.3)
+APP_VERSION = "1.0.4"         # bump this for each release, then push a matching tag (v1.0.4)
 REFRESH_MS = 60_000          # pull changes from the sheet every minute
 
 INK, MUTED = "#1A1A18", "#999996"
@@ -107,6 +107,67 @@ def _unit_summary(units):
     counts = Counter(u["status"] for u in units)
     order = store.STATUSES + sorted(set(counts) - set(store.STATUSES))
     return " · ".join(f"{counts[s]} {s}" for s in order if counts[s])
+
+
+def _natural(text):
+    """Sort key that orders numbers numerically: HT-2 before HT-10."""
+    return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", (text or "").lower())]
+
+
+class SortItem(QTableWidgetItem):
+    """A table cell that sorts by `key` (numbers, timestamps, urgency) rather than its text."""
+
+    def __init__(self, text="", key=None):
+        super().__init__(text)
+        self.key = _natural(text) if key is None else key
+
+    def __lt__(self, other):
+        other_key = getattr(other, "key", _natural(other.text()))
+        try:
+            return self.key < other_key
+        except TypeError:
+            return str(self.key) < str(other_key)
+
+def _selected_row_id(table):
+    row = table.currentRow()
+    cell = table.item(row, 0) if row >= 0 else None
+    return cell.data(Qt.UserRole) if cell else None
+
+def _reset_rows(table, n):
+    """Empty the table (hiding old dropdowns/links at once) and size it for n new rows."""
+    table.setSortingEnabled(False)          # fill first, then sort by the chosen column
+    for r in range(table.rowCount()):
+        for c in range(table.columnCount()):
+            w = table.cellWidget(r, c)
+            if w is not None:
+                w.hide()
+                table.removeCellWidget(r, c)
+    table.setRowCount(0)
+    table.setRowCount(n)
+
+def _reselect(table, row_id):
+    for r in range(table.rowCount()):
+        cell = table.item(r, 0)
+        if cell and cell.data(Qt.UserRole) == row_id:
+            table.selectRow(r)
+            return
+
+def _search_box(placeholder, on_change):
+    box = QLineEdit()
+    box.setPlaceholderText(placeholder)
+    box.setClearButtonEnabled(True)
+    box.textChanged.connect(on_change)
+    return box
+
+def _filter_combo(options, on_change):
+    """options: [(label, value), …]"""
+    combo = QComboBox()
+    for label, value in options:
+        combo.addItem(label, value)
+    combo.currentIndexChanged.connect(on_change)
+    return combo
+
+STATUS_RANK = {s: i for i, s in enumerate(store.STATUSES)}
 
 
 # ── background work ───────────────────────────────────────────────────────────
@@ -379,6 +440,12 @@ class UnitsDialog(QDialog):
         self.title.setStyleSheet("font-size:16px; font-weight:bold;")
         self.summary = QLabel()
         self.summary.setStyleSheet(f"color:{MUTED}; font-size:12px;")
+        self.search = _search_box("Search…", self._refilter)
+        self.status_filter = _filter_combo(
+            [("All statuses", None)] + [(st, st) for st in store.STATUSES], self._refilter)
+        filters = QHBoxLayout()
+        filters.addWidget(self.search, 1)
+        filters.addWidget(self.status_filter)
 
         self.table = QTableWidget(0, 0)
         self.table.verticalHeader().setVisible(False)
@@ -412,8 +479,13 @@ class UnitsDialog(QDialog):
         root.setSpacing(10)
         root.addWidget(self.title)
         root.addWidget(self.summary)
+        root.addLayout(filters)
         root.addWidget(self.table)
         root.addLayout(btns)
+        self.refresh()
+
+    def _refilter(self, *_):
+        self._shown = None
         self.refresh()
 
     def _item(self):
@@ -433,10 +505,13 @@ class UnitsDialog(QDialog):
             headers, widths, stretch = ["Nickname", "Serial number", "Qty", "Notes", "Last change"], \
                                        {0: 120, 1: 170, 2: 70, 4: 175}, 3
             self.add_btn.setText("+ Add batch")
+            self.search.setPlaceholderText("Search nicknames, serial numbers, notes…")
         else:
             headers, widths, stretch = ["Serial number", "Status", "Notes", "Last change"], \
                                        {0: 150, 1: 170, 3: 175}, 2
             self.add_btn.setText("+ Add unit")
+            self.search.setPlaceholderText("Search serial numbers, notes, where it's loaned…")
+        self.status_filter.setVisible(mode != "batch")
         self.table.setColumnCount(len(headers))
         self.table.setHorizontalHeaderLabels(headers)
         hdr = self.table.horizontalHeader()
@@ -444,6 +519,8 @@ class UnitsDialog(QDialog):
         for col, width in widths.items():
             hdr.setSectionResizeMode(col, QHeaderView.Fixed)
             self.table.setColumnWidth(col, width)
+        self.table.setSortingEnabled(True)
+        self.table.sortByColumn(0, Qt.AscendingOrder)
 
     def refresh(self):
         it = self._item()
@@ -455,8 +532,7 @@ class UnitsDialog(QDialog):
         if snapshot == self._shown:
             return              # unchanged: don't rebuild (keeps open dropdowns alive)
         self._shown = snapshot
-        row = self.table.currentRow()
-        keep = self.table.item(row, 0).data(Qt.UserRole) if row >= 0 and self.table.item(row, 0) else None
+        keep = _selected_row_id(self.table)
         if mode != self._mode:
             self._setup_columns(mode)
 
@@ -471,33 +547,40 @@ class UnitsDialog(QDialog):
                        "No serial numbers yet. Click “+ Add unit” to add one.")
         self.summary.setText(summary)
 
-        key = (lambda u: (u["nickname"].lower(), u["serial"].lower())) if batch else \
-              (lambda u: u["serial"].lower())
-        units = sorted(it["units"], key=key)
-        self.table.setRowCount(len(units))
+        query = self.search.text().strip().lower()
+        status = None if batch else self.status_filter.currentData()
+        units = [u for u in it["units"]
+                 if (not status or u["status"] == status)
+                 and (not query or any(query in (u.get(k) or "").lower()
+                                       for k in ("serial", "nickname", "notes", "loaned_to")))]
+        if len(units) < len(it["units"]):
+            self.summary.setText(f"{summary}   ·   showing {len(units)} of {len(it['units'])}")
+
+        _reset_rows(self.table, len(units))
         for r, u in enumerate(units):
             cells = []
             if batch:
-                cells.append(QTableWidgetItem(u["nickname"]))
-                cells.append(QTableWidgetItem(u["serial"]))
-                qty = QTableWidgetItem(str(u["qty"]))
+                cells.append(SortItem(u["nickname"], (_natural(u["nickname"]), _natural(u["serial"]))))
+                cells.append(SortItem(u["serial"]))
+                qty = SortItem(str(u["qty"]), u["qty"])
                 qty.setTextAlignment(Qt.AlignCenter)
                 qty.setForeground(QColor(RED if u["qty"] == 0 else INK))
                 cells.append(qty)
                 notes_text = u.get("notes", "")
             else:
-                cells.append(QTableWidgetItem(u["serial"]))
-                cells.append(None)            # status dropdown goes here
+                cells.append(SortItem(u["serial"]))
+                cells.append(SortItem("", (STATUS_RANK.get(u["status"], 99), _natural(u["serial"]))))
                 notes_text = " · ".join(filter(None, [
                     f'On loan → {u["loaned_to"]}' if u["status"] == "loaned" and u.get("loaned_to") else "",
                     u.get("notes", "")]))
-            notes = QTableWidgetItem(notes_text)
+            notes = SortItem(notes_text)
             notes.setToolTip(notes_text)
             if not batch and u["status"] == "loaned":
                 notes.setForeground(QColor(UNIT_COLORS["loaned"]))
             cells.append(notes)
             when, who = _ago(u.get("updated_at", "")), u.get("updated_by", "")
-            change = QTableWidgetItem(f"{when} · {who}" if when and who else when or who)
+            change = SortItem(f"{when} · {who}" if when and who else when or who,
+                              u.get("updated_at", ""))
             change.setForeground(QColor(MUTED))
             change.setFont(QFont("Helvetica", 11))
             cells.append(change)
@@ -505,12 +588,11 @@ class UnitsDialog(QDialog):
             cells[0].setData(Qt.UserRole, u["id"])
             cells[0].setFont(QFont("Helvetica", 13, QFont.Bold))
             for c, cell in enumerate(cells):
-                if cell is not None:
-                    self.table.setItem(r, c, cell)
+                self.table.setItem(r, c, cell)
             if not batch:
                 self.table.setCellWidget(r, 1, self._status_combo(u))
-            if u["id"] == keep:
-                self.table.selectRow(r)
+        self.table.setSortingEnabled(True)
+        _reselect(self.table, keep)
 
     def _status_combo(self, u):
         combo = QComboBox()
@@ -668,11 +750,12 @@ class OrdersDialog(QDialog):
         title.setStyleSheet("font-size:16px; font-weight:bold;")
         self.summary = QLabel()
         self.summary.setStyleSheet(f"color:{MUTED}; font-size:12px;")
-        self.show_all = QCheckBox("Show received and cancelled")
-        self.show_all.toggled.connect(self.refresh)
+        self.search = _search_box("Search items, notes, links…", self.refresh)
+        self.show_filter = _filter_combo([("Open orders", "ordered"), ("Received", "received"),
+                                   ("Cancelled", "cancelled"), ("All orders", None)], self.refresh)
         head = QHBoxLayout()
-        head.addWidget(self.summary, 1)
-        head.addWidget(self.show_all)
+        head.addWidget(self.search, 1)
+        head.addWidget(self.show_filter)
 
         self.table = QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(["Item", "Qty", "Status", "Ordered", "Link", "Note"])
@@ -690,6 +773,8 @@ class OrdersDialog(QDialog):
         self.table.setShowGrid(False)
         self.table.setWordWrap(False)
         self.table.setFocusPolicy(Qt.NoFocus)
+        self.table.setSortingEnabled(True)
+        self.table.sortByColumn(3, Qt.DescendingOrder)        # newest first
 
         receive = QPushButton("✓ Mark received…")
         receive.setObjectName("addBtn")
@@ -711,6 +796,7 @@ class OrdersDialog(QDialog):
         root.setContentsMargins(20, 16, 20, 16)
         root.setSpacing(10)
         root.addWidget(title)
+        root.addWidget(self.summary)
         root.addLayout(head)
         root.addWidget(self.table)
         root.addLayout(btns)
@@ -729,36 +815,38 @@ class OrdersDialog(QDialog):
         orders = self.win.orders
         open_ = [o for o in orders if o["status"] == "ordered"]
         self.summary.setText(f"{len(open_)} open order(s)" if open_ else "No open orders.")
-        newest = lambda o: o.get("received_at") or o.get("ordered_at", "")
-        shown = sorted(open_, key=newest, reverse=True)          # open orders first, newest on top
-        if self.show_all.isChecked():
-            shown += sorted((o for o in orders if o["status"] != "ordered"), key=newest, reverse=True)
-        row = self.table.currentRow()
-        keep = self.table.item(row, 0).data(Qt.UserRole) if row >= 0 and self.table.item(row, 0) else None
+        show, query = self.show_filter.currentData(), self.search.text().strip().lower()
+        shown = [o for o in orders
+                 if (not show or o["status"] == show)
+                 and (not query or any(query in str(o.get(k) or "").lower()
+                                       for k in ("item", "note", "link", "ordered_by")))]
+        keep = _selected_row_id(self.table)
 
-        self.table.setRowCount(len(shown))
+        _reset_rows(self.table, len(shown))
         colors = {"ordered": UNIT_COLORS["loaned"], "received": GREEN, "cancelled": MUTED}
         for r, o in enumerate(shown):
-            item = QTableWidgetItem(o["item"])
+            item = SortItem(o["item"])
             item.setData(Qt.UserRole, o["id"])
             item.setFont(QFont("Helvetica", 13, QFont.Bold))
-            qty = QTableWidgetItem(str(o["qty"]))
+            qty = SortItem(str(o["qty"]), o["qty"])
             qty.setTextAlignment(Qt.AlignCenter)
-            status = QTableWidgetItem("on order" if o["status"] == "ordered" else o["status"])
+            status = SortItem("on order" if o["status"] == "ordered" else o["status"],
+                              ({"ordered": 0, "received": 1}.get(o["status"], 2), o.get("ordered_at", "")))
             status.setForeground(QColor(colors.get(o["status"], INK)))
             if o["status"] != "ordered" and o.get("received_at"):
                 status.setToolTip(f'{o["status"]} {o["received_at"]} by {o.get("received_by", "")}')
             when, who = _ago(o.get("ordered_at", "")), o.get("ordered_by", "")
-            ordered = QTableWidgetItem(f"{when} · {who}" if when and who else when or who)
+            ordered = SortItem(f"{when} · {who}" if when and who else when or who, o.get("ordered_at", ""))
             ordered.setForeground(QColor(MUTED))
             ordered.setToolTip(o.get("ordered_at", ""))
-            note = QTableWidgetItem(o.get("note", ""))
+            note = SortItem(o.get("note", ""))
             note.setToolTip(o.get("note", ""))
-            for c, cell in ((0, item), (1, qty), (2, status), (3, ordered), (5, note)):
+            link = SortItem("", (o.get("link") or "~").lower())
+            for c, cell in ((0, item), (1, qty), (2, status), (3, ordered), (4, link), (5, note)):
                 self.table.setItem(r, c, cell)
             self.table.setCellWidget(r, 4, _link_label(o.get("link", "")))
-            if o["id"] == keep:
-                self.table.selectRow(r)
+        self.table.setSortingEnabled(True)
+        _reselect(self.table, keep)
 
 
 # ── check out / return ────────────────────────────────────────────────────────
@@ -953,12 +1041,25 @@ class InventoryApp(QMainWindow):
             stat_row.addWidget(card)
         root.addLayout(stat_row)
 
-        # ── search + table ────────────────────────────────────────────────────
-        self.search = QLineEdit()
-        self.search.setPlaceholderText("Search items, types, serial numbers, nicknames…")
-        self.search.setClearButtonEnabled(True)
-        self.search.textChanged.connect(self._refresh_table)
-        root.addWidget(self.search)
+        # ── search, filters + table ───────────────────────────────────────────
+        self.search = _search_box("Search items, types, serial numbers, nicknames…", self._refresh_table)
+        self.type_filter = QComboBox()
+        self.type_filter.setMinimumWidth(140)
+        self.type_filter.currentIndexChanged.connect(self._refresh_table)
+        self.show_filter = _filter_combo([("All items", "all"), ("Low stock / issues", "low"),
+                                          ("Out of stock", "out"), ("On order", "ordered"),
+                                          ("On loan", "loaned")], self._refresh_table)
+        self.count_lbl = QLabel()
+        self.count_lbl.setStyleSheet(f"color:{MUTED}; font-size:11px;")
+        for combo in (self.type_filter, self.show_filter):
+            combo.setMinimumHeight(self.search.sizeHint().height())
+        filters = QHBoxLayout()
+        filters.setSpacing(10)
+        filters.addWidget(self.search, 1)
+        filters.addWidget(self.type_filter)
+        filters.addWidget(self.show_filter)
+        filters.addWidget(self.count_lbl)
+        root.addLayout(filters)
 
         self.table = QTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels(["Item", "Type", "Qty", "Status", "Last change"])
@@ -979,6 +1080,9 @@ class InventoryApp(QMainWindow):
         self.table.setFocusPolicy(Qt.ClickFocus)
         self.table.doubleClicked.connect(self._on_double_click)
         self.table.itemSelectionChanged.connect(self._update_buttons)
+        self.table.setSortingEnabled(True)
+        self.table.sortByColumn(3, Qt.AscendingOrder)      # by status: most urgent first
+        self._populate_type_filter()
         for key in (Qt.Key_Delete, Qt.Key_Backspace):
             QShortcut(QKeySequence(key), self.table, self._remove, context=Qt.WidgetShortcut)
         root.addWidget(self.table)
@@ -1206,6 +1310,7 @@ class InventoryApp(QMainWindow):
             self.last_sync = datetime.now()
             self._set_conn("sheets")
         self.type_input.populate()
+        self._populate_type_filter()
         self._refresh_table()
         self._update_buttons()
         if self._units_dlg:
@@ -1227,18 +1332,40 @@ class InventoryApp(QMainWindow):
 
     # ── refresh ───────────────────────────────────────────────────────────────
 
-    def _matches(self, it, query):
-        return (query in it["name"].lower() or query in it.get("type", "").lower()
-                or any(query in u["serial"].lower() or query in u["nickname"].lower()
-                       for u in it["units"]))
+    def _populate_type_filter(self):
+        current = self.type_filter.currentData()
+        self.type_filter.blockSignals(True)
+        self.type_filter.clear()
+        self.type_filter.addItem("All types", None)
+        for t in self.types:
+            self.type_filter.addItem(t["name"], t["name"])
+        self.type_filter.addItem("No type", "")
+        self.type_filter.setCurrentIndex(max(0, self.type_filter.findData(current)))
+        self.type_filter.blockSignals(False)
 
-    def _refresh_table(self):
+    def _matches(self, it, query):
+        if query and not (query in it["name"].lower() or query in it.get("type", "").lower()
+                          or any(query in u["serial"].lower() or query in u["nickname"].lower()
+                                 for u in it["units"])):
+            return False
+        type_ = self.type_filter.currentData()
+        if type_ is not None and (it.get("type") or "").lower() != type_.lower():
+            return False
+        show = self.show_filter.currentData()
+        if show == "low":     return self._level(it) == 1
+        if show == "out":     return self._level(it) == 0
+        if show == "ordered": return bool(self._open_orders_for(it))
+        if show == "loaned":  return any(u["status"] == "loaned" for u in it["units"])
+        return True
+
+    def _refresh_table(self, *_):
         keep = self._selected_id()
         query = self.search.text().strip().lower()
-        shown = sorted((i for i in self.items if self._matches(i, query)),
-                       key=lambda x: (self._level(x), x["name"].lower()))
+        shown = [i for i in self.items if self._matches(i, query)]
+        self.count_lbl.setText(f"{len(shown)} of {len(self.items)} items" if len(shown) < len(self.items)
+                               else f"{len(self.items)} items")
 
-        self.table.setRowCount(len(shown))
+        _reset_rows(self.table, len(shown))
         for r, it in enumerate(shown):
             lbl, color = self._status(it)
             mode = self._mode(it)
@@ -1246,7 +1373,7 @@ class InventoryApp(QMainWindow):
             if on_order:
                 lbl += f' · {sum(o["qty"] for o in on_order)} on order'
 
-            name_item = QTableWidgetItem(it["name"])
+            name_item = SortItem(it["name"])
             name_item.setData(Qt.UserRole, it["id"])
             name_item.setFont(QFont("Helvetica", 13))
             if it["units"]:
@@ -1262,16 +1389,16 @@ class InventoryApp(QMainWindow):
                     f'  {o["qty"]} ({o["ordered_at"]})' + (f' — {o["note"]}' if o.get("note") else "")
                     for o in on_order])))
 
-            type_item = QTableWidgetItem(it.get("type", ""))
+            type_item = SortItem(it.get("type", ""), ((it.get("type") or "~").lower(), _natural(it["name"])))
             type_item.setFont(QFont("Helvetica", 12))
             type_item.setForeground(QColor("#666663"))
 
-            qty_item = QTableWidgetItem(str(it["qty"]))
+            qty_item = SortItem(str(it["qty"]), it["qty"])
             qty_item.setTextAlignment(Qt.AlignCenter)
             qty_item.setFont(QFont("Helvetica", 13, QFont.Bold))
             qty_item.setForeground(QColor(color))
 
-            status_item = QTableWidgetItem(lbl)
+            status_item = SortItem(lbl, (self._level(it), _natural(it["name"])))
             status_item.setTextAlignment(Qt.AlignCenter)
             status_item.setFont(QFont("Helvetica", 12))
             status_item.setForeground(QColor(color))
@@ -1279,15 +1406,16 @@ class InventoryApp(QMainWindow):
 
             when = _ago(it.get("updated_at", ""))
             who = it.get("updated_by", "")
-            change_item = QTableWidgetItem(f"{when} · {who}" if when and who else when or who)
+            change_item = SortItem(f"{when} · {who}" if when and who else when or who,
+                                   it.get("updated_at", ""))
             change_item.setFont(QFont("Helvetica", 11))
             change_item.setForeground(QColor(MUTED))
             change_item.setToolTip(it.get("updated_at", ""))
 
             for c, cell in enumerate((name_item, type_item, qty_item, status_item, change_item)):
                 self.table.setItem(r, c, cell)
-            if it["id"] == keep:
-                self.table.selectRow(r)
+        self.table.setSortingEnabled(True)
+        _reselect(self.table, keep)
 
         self.stat_labels["total"].setText(str(len(self.items)))
         self.stat_labels["units"].setText(str(sum(i["qty"] for i in self.items)))
