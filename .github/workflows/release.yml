@@ -1,0 +1,45 @@
+# Builds the Mac app and publishes it as a GitHub Release whenever a version
+# tag is pushed:   git tag v1.0.1 && git push origin v1.0.1
+name: Build & release Mac app
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  mac:
+    runs-on: macos-14            # Apple Silicon
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build app
+        run: ./build_mac.sh
+
+      - name: Zip app
+        run: cd dist && ditto -c -k --keepParent "Qave Inventory.app" Qave-Inventory-mac.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Qave-Inventory-mac
+          path: dist/Qave-Inventory-mac.zip
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Qave Inventory ${{ github.ref_name }}
+          files: dist/Qave-Inventory-mac.zip
+          body: |
+            **Install or update:** open Terminal and run
+            ```
+            curl -fsSL https://raw.githubusercontent.com/shivthakar-vital/qave-inventory/main/install.sh | bash
+            ```
+            Full instructions: [INSTALL.md](https://github.com/shivthakar-vital/qave-inventory/blob/main/INSTALL.md)

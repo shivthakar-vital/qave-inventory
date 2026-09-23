@@ -23,17 +23,24 @@ so several people can use the app at once and anyone can view the data in the br
 - Works offline in local mode. In Sheets mode it keeps showing the last synced data if
   the connection drops
 
-## Install the app (macOS)
+## Install
+
+**On any Apple Silicon Mac**, paste this into Terminal:
 
 ```bash
-./build_mac.sh --install
+curl -fsSL https://raw.githubusercontent.com/shivthakar-vital/qave-inventory/main/install.sh | bash
 ```
 
-This builds `Qave Inventory.app` and copies it to `/Applications`. After that, open it
-from Spotlight or Launchpad like any other app. (Drop `--install` to only build into `dist/`.)
+See **[INSTALL.md](INSTALL.md)** for step-by-step instructions to share with coworkers,
+including how to connect to the shared sheet.
 
-> **Sharing the app with coworkers:** send them the zipped `.app`. It isn't signed by
-> Apple, so the first time they must **right-click → Open → Open**.
+### Building it yourself
+
+`./build_mac.sh --install` builds `Qave Inventory.app` from source and copies it to
+`/Applications`. Drop `--install` to only build into `dist/`.
+
+To publish a new version for everyone, push a tag such as `git tag v1.0.1 && git push origin v1.0.1`.
+GitHub Actions builds the app and attaches it to a GitHub Release, which the install line downloads.
 
 **Windows:** run `build_windows.bat` on a Windows PC with Python 3. The app ends up in
 `dist\Qave Inventory\Qave Inventory.exe`.
@@ -143,4 +150,6 @@ can't be committed by accident.
 | `qave_inventory.py` | The app window (PyQt5) |
 | `inventory_store.py` | Data layer: local JSON and Google Sheets backends |
 | `build_mac.sh` / `build_windows.bat` | Build the standalone app with PyInstaller |
+| `install.sh` | One-line installer that downloads the latest release |
+| `.github/workflows/release.yml` | Builds and publishes the Mac app when a version tag is pushed |
 | `scripts/make_icon.py` | Regenerates `assets/icon.png` and `icon.icns` |
