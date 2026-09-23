@@ -40,8 +40,9 @@ including how to connect to the shared sheet.
 `./build_mac.sh --install` builds `Qave Inventory.app` from source and copies it to
 `/Applications`. Drop `--install` to only build into `dist/`.
 
-To publish a new version for everyone, push a tag such as `git tag v1.0.1 && git push origin v1.0.1`.
-GitHub Actions builds the app and attaches it to a GitHub Release, which the install line downloads.
+To publish a new version for everyone, bump `APP_VERSION` at the top of `qave_inventory.py`,
+commit, and push a matching tag (e.g. `v1.0.3`). GitHub Actions checks that the two match,
+builds the app, and attaches it to a GitHub Release, which the install line downloads.
 
 **Windows:** run `build_windows.bat` on a Windows PC with Python 3. The app ends up in
 `dist\Qave Inventory\Qave Inventory.exe`.

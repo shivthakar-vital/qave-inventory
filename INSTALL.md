@@ -79,14 +79,23 @@ Python 3: download the code, then run `./build_mac.sh --install` in Terminal fro
 
 ### For Shiv: publishing a new version
 
-Push a version tag and GitHub builds and publishes the app automatically (about 5 minutes):
+1. In `qave_inventory.py`, bump the version near the top:
 
-```bash
-git tag v1.0.1
-```
+   ```python
+   APP_VERSION = "1.0.3"
+   ```
 
-```bash
-git push origin v1.0.1
-```
+2. Commit that change, push it to `main`, then push a matching tag:
 
-Everyone gets the update the next time they run the install line.
+   ```bash
+   git tag v1.0.3
+   ```
+
+   ```bash
+   git push origin v1.0.3
+   ```
+
+GitHub builds and publishes the app in about 3 minutes. If the tag doesn't match
+`APP_VERSION`, the build stops with an error and nothing is published. Everyone gets the
+update the next time they run the install line, and the version shows in the bottom-right
+corner of the app.

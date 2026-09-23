@@ -20,6 +20,15 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Check tag matches APP_VERSION
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          version="$(sed -n 's/^APP_VERSION *= *"\([^"]*\)".*/\1/p' qave_inventory.py)"
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME doesn't match APP_VERSION = \"$version\" in qave_inventory.py. Update one so they match."
+            exit 1
+          fi
+
       - name: Build app
         run: ./build_mac.sh
 

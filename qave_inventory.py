@@ -27,7 +27,8 @@ from PyQt5.QtGui import QFont, QColor, QPalette, QKeySequence
 
 import inventory_store as store
 
-APP_TITLE  = "Qave Inventory"
+APP_TITLE   = "Qave Inventory"
+APP_VERSION = "1.0.2"         # bump this for each release, then push a matching tag (v1.0.2)
 REFRESH_MS = 60_000          # pull changes from the sheet every minute
 
 INK, MUTED = "#1A1A18", "#999996"
@@ -646,7 +647,7 @@ class MoveDialog(QDialog):
 class InventoryApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(APP_TITLE)
+        self.setWindowTitle(f"{APP_TITLE} {APP_VERSION}")
         self.resize(980, 640)
         self.setMinimumSize(760, 480)
         self.setStyleSheet(STYLESHEET)
@@ -802,6 +803,9 @@ class InventoryApp(QMainWindow):
         self.conn_lbl.setStyleSheet("font-size:11px;")
         status_row.addWidget(self.status_lbl, 1)
         status_row.addWidget(self.conn_lbl)
+        version_lbl = QLabel(f"v{APP_VERSION}")
+        version_lbl.setStyleSheet(f"color:{MUTED}; font-size:11px; margin-left:10px;")
+        status_row.addWidget(version_lbl)
         root.addLayout(status_row)
 
         self._edit_buttons = [self.add_btn, self.btn_checkout, self.btn_restock,
@@ -1258,6 +1262,7 @@ if __name__ == "__main__":
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     app = QApplication(sys.argv)
     app.setApplicationName(APP_TITLE)
+    app.setApplicationVersion(APP_VERSION)
     app.setStyle("Fusion")   # consistent look on all platforms including macOS
     app.setPalette(_light_palette())
     window = InventoryApp()
