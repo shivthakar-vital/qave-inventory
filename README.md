@@ -118,9 +118,15 @@ Every movement, with its note, is recorded in the **Log** tab.
 
 **Types** tab: `name` and `tracking` (`serial`, `batch`, or `count`)
 
-You can edit the sheet by hand. Change a `qty` or add a row with just a `name` and a
-`qty`, and the app picks it up on the next sync (it fills in the `id` itself). On the
-Units tab, a row with just `item` (the item's name) and `serial` works too (plus `qty` for batches).
+You can edit the sheet by hand, and you never need to fill in the `id` columns:
+
+- **Add an item:** a row with just a `name` (plus `type` and `qty`) works.
+- **Add a unit or batch:** on the Units tab, `item` (the item's name) and `serial` are
+  enough (plus `nickname` and `qty` for batches).
+- **Rename an item:** just change its `name`. Its units stay linked through `item_id`.
+
+On the next sync, the app fills in missing `id` / `item_id` values, gives copy-pasted rows
+a fresh `id`, and updates the Units tab's `item` column to match renamed items.
 Columns are matched by header name, so you can reorder them or add your own columns next to them.
 
 ## Where data is stored

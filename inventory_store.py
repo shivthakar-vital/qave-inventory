@@ -581,6 +581,8 @@ class SheetsBackend(Backend):
                 unit_fixes.append({"range": rowcol_to_a1(r, uc["id"]), "values": [[unit_id]]})
             if cell["item_id"] != it["id"]:              # linked by name when typed by hand
                 unit_fixes.append({"range": rowcol_to_a1(r, uc["item_id"]), "values": [[it["id"]]]})
+            if cell["item"] != it["name"]:               # item was renamed in the sheet
+                unit_fixes.append({"range": rowcol_to_a1(r, uc["item"]), "values": [[it["name"]]]})
             it["units"].append({"id": unit_id, "serial": cell["serial"], "nickname": cell["nickname"],
                                 "qty": _to_int(cell["qty"]) if cell["qty"] else 1,
                                 "status": cell["status"].lower(), "notes": cell["notes"],
