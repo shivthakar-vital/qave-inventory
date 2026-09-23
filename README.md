@@ -9,6 +9,9 @@ so several people can use the app at once and anyone can view the data in the br
 ## Features
 
 - Add, check out, restock, rename, and remove items (double-click a row to check out)
+- **Optional serial numbers**: track equipment unit by unit (e.g. `HT-12005`), each with
+  a status (**working**, **broken**, **in repairs**, **dormant**) and notes. Select an item
+  and click **Serial numbers…**
 - Low-stock and out-of-stock highlighting, with an adjustable alert level
 - Search box, plus a "Last change" column showing who changed each item and when
 - **Google Sheets sync**: the sheet acts as the database. The app pulls changes every
@@ -60,7 +63,7 @@ share the sheet with. This is a one-time setup, about 10 minutes.
 7. **Configure the app.** In the app, click **⚙ Settings**, paste the sheet link, click
    **Choose key file…**, pick the JSON file, then click **Save**.
 
-The app creates an **Inventory** tab and a **Log** tab. If you were already using the
+The app creates **Inventory**, **Units**, and **Log** tabs. If you were already using the
 app locally and the sheet is empty, it offers to upload your existing items.
 
 Each teammate installs the app and repeats step 7 with the same link and key file.
@@ -69,14 +72,33 @@ Each teammate installs the app and repeats step 7 with the same link and key fil
 > your Google Workspace admin may need to allow it, or create the service account in the
 > company's Google Cloud organization.
 
+## Serial numbers
+
+Most items are simply counted. For equipment where each unit matters, select the item
+and click **Serial numbers…** (or double-click it once it has serials) to add units. Each
+unit has a serial number, a status, and optional notes. Change a status right from the
+dropdown in the list, and it saves immediately.
+
+Once an item has serial numbers, its quantity is the number of units. Its colour in the
+main list reflects how many units work: green if all do, amber if some don't, and red if
+none do. Search matches serial numbers too.
+
 ### Sheet format
+
+**Inventory** tab: one row per item
 
 | id | name | qty | updated_at | updated_by |
 |----|------|-----|------------|------------|
 
+**Units** tab: one row per serial-numbered unit
+
+| id | item_id | item | serial | status | notes | updated_at | updated_by |
+|----|---------|------|--------|--------|-------|------------|------------|
+
 You can edit the sheet by hand. Change a `qty` or add a row with just a `name` and a
-`qty`, and the app picks it up on the next sync (it fills in the `id` itself). Columns
-are matched by header name, so you can reorder them or add your own columns next to them.
+`qty`, and the app picks it up on the next sync (it fills in the `id` itself). On the
+Units tab, a row with just `item` (the item's name), `serial`, and `status` works too.
+Columns are matched by header name, so you can reorder them or add your own columns next to them.
 
 ## Where data is stored
 

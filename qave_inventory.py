@@ -13,13 +13,14 @@ Build a double-clickable app:
 """
 
 import sys
+from collections import Counter
 from datetime import datetime
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QLineEdit, QPushButton, QTableWidget, QTableWidgetItem,
     QHeaderView, QMessageBox, QInputDialog, QFrame, QDialog, QFormLayout,
-    QDialogButtonBox, QFileDialog, QSpinBox, QShortcut
+    QDialogButtonBox, QFileDialog, QSpinBox, QShortcut, QComboBox
 )
 from PyQt5.QtCore import Qt, QObject, QRunnable, QThreadPool, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont, QColor, QPalette, QKeySequence
@@ -32,6 +33,7 @@ REFRESH_MS = 60_000          # pull changes from the sheet every minute
 INK, MUTED = "#1A1A18", "#999996"
 GREEN, AMBER, RED = "#3B6D11", "#854F0B", "#A32D2D"
 ACCENT = "#1D9E75"
+UNIT_COLORS = {"working": GREEN, "broken": RED, "in repairs": AMBER, "dormant": MUTED}
 
 STYLESHEET = """
     QMainWindow, QWidget#central, QDialog { background: #F5F5F2; }
@@ -43,6 +45,10 @@ STYLESHEET = """
         selection-background-color: #1D9E75;
     }
     QLineEdit:focus, QSpinBox:focus { border: 1.5px solid #1D9E75; }
+    QComboBox {
+        background: #FFFFFF; border: 1px solid #CCCCC8; border-radius: 6px;
+        padding: 3px 10px; font-size: 13px;
+    }
     QTableWidget {
         background: #FFFFFF; color: #1A1A18;
         border: 1px solid #E0DDD8; border-radius: 8px;
@@ -92,6 +98,13 @@ def _ago(ts):
     if mins < 60 * 24:  return f"{mins // 60}h ago"
     if mins < 60 * 24 * 7: return f"{mins // (60 * 24)}d ago"
     return t.strftime("%b %d")
+
+
+def _unit_summary(units):
+    """e.g. "2 working · 1 in repairs" (known statuses first)."""
+    counts = Counter(u["status"] for u in units)
+    order = store.STATUSES + sorted(set(counts) - set(store.STATUSES))
+    return " · ".join(f"{counts[s]} {s}" for s in order if counts[s])
 
 
 # ── background work ───────────────────────────────────────────────────────────
@@ -188,6 +201,206 @@ class SettingsDialog(QDialog):
                     low_stock=self.low.value())
 
 
+# ── serial numbers ────────────────────────────────────────────────────────────
+
+class UnitDialog(QDialog):
+    """Add or edit one serial-numbered unit."""
+
+    def __init__(self, parent, title, unit=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setMinimumWidth(420)
+        unit = unit or {}
+
+        self.serial = QLineEdit(unit.get("serial", ""))
+        self.serial.setPlaceholderText("e.g. HT-12005")
+        self.status = QComboBox()
+        self.status.addItems(store.STATUSES)
+        current = unit.get("status", "working")
+        if current not in store.STATUSES:
+            self.status.addItem(current)
+        self.status.setCurrentText(current)
+        self.notes = QLineEdit(unit.get("notes", ""))
+        self.notes.setPlaceholderText("Optional — location, who has it, what's wrong…")
+
+        form = QFormLayout()
+        form.setSpacing(10)
+        form.addRow("Serial number", self.serial)
+        form.addRow("Status", self.status)
+        form.addRow("Notes", self.notes)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        root = QVBoxLayout(self)
+        root.addLayout(form)
+        root.addWidget(buttons)
+
+    def accept(self):
+        if not self.serial.text().strip():
+            QMessageBox.warning(self, "Missing serial", "Please enter a serial number.")
+            return
+        super().accept()
+
+    def values(self):
+        return dict(serial=self.serial.text().strip(), status=self.status.currentText(),
+                    notes=self.notes.text().strip())
+
+
+class UnitsDialog(QDialog):
+    """Lists the serial-numbered units of one item. Status changes save immediately."""
+
+    def __init__(self, win, item_id):
+        super().__init__(win)
+        self.win, self.item_id = win, item_id
+        self._shown = None
+        self.setMinimumSize(780, 440)
+
+        self.title = QLabel()
+        self.title.setStyleSheet("font-size:16px; font-weight:bold;")
+        self.summary = QLabel()
+        self.summary.setStyleSheet(f"color:{MUTED}; font-size:12px;")
+
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["Serial number", "Status", "Notes", "Last change"])
+        hdr = self.table.horizontalHeader()
+        hdr.setSectionResizeMode(2, QHeaderView.Stretch)
+        for col, width in ((0, 150), (1, 170), (3, 175)):
+            hdr.setSectionResizeMode(col, QHeaderView.Fixed)
+            self.table.setColumnWidth(col, width)
+        self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(40)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setShowGrid(False)
+        self.table.setWordWrap(False)
+        self.table.setFocusPolicy(Qt.NoFocus)
+        self.table.doubleClicked.connect(self._edit)
+
+        add = QPushButton("+ Add unit")
+        add.setObjectName("addBtn")
+        edit = QPushButton("Edit…")
+        remove = QPushButton("Remove unit")
+        remove.setObjectName("removeBtn")
+        close = QPushButton("Close")
+        add.clicked.connect(self._add)
+        edit.clicked.connect(self._edit)
+        remove.clicked.connect(self._remove)
+        close.clicked.connect(self.accept)
+        btns = QHBoxLayout()
+        for b in (add, edit, remove):
+            btns.addWidget(b)
+        btns.addStretch()
+        btns.addWidget(close)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 16, 20, 16)
+        root.setSpacing(10)
+        root.addWidget(self.title)
+        root.addWidget(self.summary)
+        root.addWidget(self.table)
+        root.addLayout(btns)
+        self.refresh()
+
+    def _item(self):
+        return next((i for i in self.win.items if i["id"] == self.item_id), None)
+
+    def _selected_unit(self):
+        it, row = self._item(), self.table.currentRow()
+        unit_id = self.table.item(row, 0).data(Qt.UserRole) if it and row >= 0 else None
+        u = next((u for u in it["units"] if u["id"] == unit_id), None) if it else None
+        if u is None:
+            QMessageBox.information(self, "No selection", "Select a unit first.")
+        return u
+
+    def refresh(self):
+        it = self._item()
+        if it is None:
+            self.reject()
+            return
+        snapshot = (it["name"], repr(it["units"]))
+        if snapshot == self._shown:
+            return              # unchanged: don't rebuild (keeps open dropdowns alive)
+        self._shown = snapshot
+        row = self.table.currentRow()
+        keep = self.table.item(row, 0).data(Qt.UserRole) if row >= 0 and self.table.item(row, 0) else None
+
+        self.setWindowTitle(f'Serial numbers — {it["name"]}')
+        self.title.setText(it["name"])
+        self.summary.setText(_unit_summary(it["units"]) if it["units"] else
+                             "No serial numbers yet. Click “+ Add unit” to track units individually.")
+
+        units = sorted(it["units"], key=lambda u: u["serial"].lower())
+        self.table.setRowCount(len(units))
+        for r, u in enumerate(units):
+            serial = QTableWidgetItem(u["serial"])
+            serial.setData(Qt.UserRole, u["id"])
+            serial.setFont(QFont("Helvetica", 13, QFont.Bold))
+            self.table.setItem(r, 0, serial)
+
+            combo = QComboBox()
+            combo.addItems(store.STATUSES)
+            if u["status"] not in store.STATUSES:
+                combo.addItem(u["status"])
+            combo.setCurrentText(u["status"])
+            combo.setStyleSheet(f"QComboBox {{ color:{UNIT_COLORS.get(u['status'], INK)}; "
+                                "font-weight:bold; margin: 5px 8px; }")
+            combo.currentTextChanged.connect(
+                lambda status, uid=u["id"], sn=u["serial"]: self._set_status(uid, sn, status))
+            self.table.setCellWidget(r, 1, combo)
+
+            notes = QTableWidgetItem(u.get("notes", ""))
+            notes.setToolTip(u.get("notes", ""))
+            self.table.setItem(r, 2, notes)
+
+            when, who = _ago(u.get("updated_at", "")), u.get("updated_by", "")
+            change = QTableWidgetItem(f"{when} · {who}" if when and who else when or who)
+            change.setForeground(QColor(MUTED))
+            change.setFont(QFont("Helvetica", 11))
+            self.table.setItem(r, 3, change)
+            if u["id"] == keep:
+                self.table.selectRow(r)
+
+    def _set_status(self, unit_id, serial, status):
+        self.win._do(lambda: self.win.backend.update_unit(self.item_id, unit_id, status=status),
+                     f"{serial} → {status}.")
+
+    def _add(self):
+        it = self._item()
+        if not it: return
+        if not it["units"] and it["qty"] > 0:
+            reply = QMessageBox.question(
+                self, "Track by serial number",
+                f'"{it["name"]}" currently has a quantity of {it["qty"]}.\n\n'
+                "Once it has serial numbers, its quantity becomes the number of units "
+                "you've entered here. Continue?", QMessageBox.Yes | QMessageBox.No)
+            if reply != QMessageBox.Yes: return
+        dlg = UnitDialog(self, f'Add unit — {it["name"]}')
+        if dlg.exec_() != QDialog.Accepted: return
+        v = dlg.values()
+        self.win._do(lambda: self.win.backend.add_unit(self.item_id, **v),
+                     f'Added {v["serial"]} to {it["name"]}.')
+
+    def _edit(self):
+        u = self._selected_unit()
+        if not u: return
+        dlg = UnitDialog(self, f'Edit unit — {u["serial"]}', u)
+        if dlg.exec_() != QDialog.Accepted: return
+        unit_id, v = u["id"], dlg.values()
+        self.win._do(lambda: self.win.backend.update_unit(self.item_id, unit_id, **v),
+                     f'Updated {v["serial"]}.')
+
+    def _remove(self):
+        u = self._selected_unit()
+        if not u: return
+        reply = QMessageBox.question(self, "Remove unit", f'Remove unit {u["serial"]}?',
+                                     QMessageBox.Yes | QMessageBox.No)
+        if reply != QMessageBox.Yes: return
+        unit_id, serial = u["id"], u["serial"]
+        self.win._do(lambda: self.win.backend.remove_unit(self.item_id, unit_id),
+                     f"Removed unit {serial}.")
+
+
 # ── main window ───────────────────────────────────────────────────────────────
 
 class InventoryApp(QMainWindow):
@@ -205,6 +418,7 @@ class InventoryApp(QMainWindow):
         self.pool = QThreadPool(self)
         self.pool.setMaxThreadCount(1)
         self._tasks = set()
+        self._units_dlg = None
 
         self._build_ui()
         self._refresh_table()
@@ -233,7 +447,8 @@ class InventoryApp(QMainWindow):
         self.name_input.returnPressed.connect(self._add_item)
 
         self.qty_input = QSpinBox()
-        self.qty_input.setRange(1, 99999)
+        self.qty_input.setRange(0, 99999)
+        self.qty_input.setValue(1)
         self.qty_input.setFixedWidth(90)
         self.qty_input.lineEdit().returnPressed.connect(self._add_item)
 
@@ -282,7 +497,7 @@ class InventoryApp(QMainWindow):
 
         # ── search + table ────────────────────────────────────────────────────
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Search items…")
+        self.search.setPlaceholderText("Search items or serial numbers…")
         self.search.setClearButtonEnabled(True)
         self.search.textChanged.connect(self._refresh_table)
         root.addWidget(self.search)
@@ -291,17 +506,20 @@ class InventoryApp(QMainWindow):
         self.table.setHorizontalHeaderLabels(["Item", "Qty", "Status", "Last change"])
         hdr = self.table.horizontalHeader()
         hdr.setSectionResizeMode(0, QHeaderView.Stretch)
-        for col, width in ((1, 80), (2, 130), (3, 170)):
+        for col, width in ((1, 70), (3, 175)):
             hdr.setSectionResizeMode(col, QHeaderView.Fixed)
             self.table.setColumnWidth(col, width)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        hdr.setMinimumSectionSize(70)
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(40)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.SingleSelection)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setShowGrid(False)
+        self.table.setWordWrap(False)
         self.table.setFocusPolicy(Qt.ClickFocus)
-        self.table.doubleClicked.connect(self._checkout)
+        self.table.doubleClicked.connect(self._on_double_click)
         for key in (Qt.Key_Delete, Qt.Key_Backspace):
             QShortcut(QKeySequence(key), self.table, self._remove, context=Qt.WidgetShortcut)
         root.addWidget(self.table)
@@ -312,14 +530,17 @@ class InventoryApp(QMainWindow):
         self.btn_checkout = QPushButton("− Check out")
         self.btn_restock  = QPushButton("+ Restock")
         self.btn_rename   = QPushButton("Rename")
+        self.btn_units    = QPushButton("Serial numbers…")
         self.btn_remove   = QPushButton("Remove")
         self.btn_remove.setObjectName("removeBtn")
         self.btn_checkout.setToolTip("Tip: double-click a row to check it out")
+        self.btn_units.setToolTip("Track individual units by serial number and status")
+        self.btn_units.clicked.connect(self._open_units)
         self.btn_checkout.clicked.connect(self._checkout)
         self.btn_restock.clicked.connect(self._restock)
         self.btn_rename.clicked.connect(self._rename)
         self.btn_remove.clicked.connect(self._remove)
-        for b in (self.btn_checkout, self.btn_restock, self.btn_rename):
+        for b in (self.btn_checkout, self.btn_restock, self.btn_rename, self.btn_units):
             act_row.addWidget(b)
         act_row.addStretch()
         act_row.addWidget(self.btn_remove)
@@ -340,16 +561,20 @@ class InventoryApp(QMainWindow):
 
     # ── helpers ───────────────────────────────────────────────────────────────
 
-    def _level(self, qty):
-        """0 = out, 1 = low, 2 = ok (also the sort order)."""
-        if qty == 0: return 0
-        if qty <= self.cfg["low_stock"]: return 1
+    def _level(self, it):
+        """0 = out / none working, 1 = low / some not working, 2 = ok (also the sort order)."""
+        if it["units"]:
+            working = sum(u["status"] == "working" for u in it["units"])
+            return 0 if working == 0 else 1 if working < len(it["units"]) else 2
+        if it["qty"] == 0: return 0
+        if it["qty"] <= self.cfg["low_stock"]: return 1
         return 2
 
-    def _status(self, qty):
-        return [("Out of stock", RED),
-                (f"Low  (≤{self.cfg['low_stock']})", AMBER),
-                ("In stock", GREEN)][self._level(qty)]
+    def _status(self, it):
+        color = [RED, AMBER, GREEN][self._level(it)]
+        if it["units"]:
+            return _unit_summary(it["units"]), color
+        return ["Out of stock", f"Low  (≤{self.cfg['low_stock']})", "In stock"][self._level(it)], color
 
     def _selected_id(self):
         row = self.table.currentRow()
@@ -409,6 +634,9 @@ class InventoryApp(QMainWindow):
 
     def _on_error(self, exc, note="Your change was not saved."):
         msg = store.describe_error(exc)
+        if self._units_dlg:              # undo e.g. a status dropdown that didn't save
+            self._units_dlg._shown = None
+            self._units_dlg.refresh()
         if isinstance(exc, store.InventoryError):
             self._set_status(msg)
             QMessageBox.warning(self, "Can't do that", msg)
@@ -483,6 +711,8 @@ class InventoryApp(QMainWindow):
             self.last_sync = datetime.now()
             self._set_conn("sheets")
         self._refresh_table()
+        if self._units_dlg:
+            self._units_dlg.refresh()
         if msg:
             self._set_status(msg(items) if callable(msg) else msg)
 
@@ -501,16 +731,21 @@ class InventoryApp(QMainWindow):
     def _refresh_table(self):
         keep = self._selected_id()
         query = self.search.text().strip().lower()
-        shown = sorted((i for i in self.items if query in i["name"].lower()),
-                       key=lambda x: (self._level(x["qty"]), x["name"].lower()))
+        shown = sorted((i for i in self.items
+                        if query in i["name"].lower()
+                        or any(query in u["serial"].lower() for u in i["units"])),
+                       key=lambda x: (self._level(x), x["name"].lower()))
 
         self.table.setRowCount(len(shown))
         for r, it in enumerate(shown):
-            lbl, color = self._status(it["qty"])
+            lbl, color = self._status(it)
 
             name_item = QTableWidgetItem(it["name"])
             name_item.setData(Qt.UserRole, it["id"])
             name_item.setFont(QFont("Helvetica", 13))
+            if it["units"]:
+                name_item.setToolTip("\n".join(f'{u["serial"]} — {u["status"]}' for u in
+                                               sorted(it["units"], key=lambda u: u["serial"].lower())))
 
             qty_item = QTableWidgetItem(str(it["qty"]))
             qty_item.setTextAlignment(Qt.AlignCenter)
@@ -521,6 +756,7 @@ class InventoryApp(QMainWindow):
             status_item.setTextAlignment(Qt.AlignCenter)
             status_item.setFont(QFont("Helvetica", 12))
             status_item.setForeground(QColor(color))
+            status_item.setToolTip(lbl)
 
             when = _ago(it.get("updated_at", ""))
             who = it.get("updated_by", "")
@@ -536,8 +772,8 @@ class InventoryApp(QMainWindow):
 
         self.stat_labels["total"].setText(str(len(self.items)))
         self.stat_labels["units"].setText(str(sum(i["qty"] for i in self.items)))
-        self.stat_labels["low"].setText(str(sum(1 for i in self.items if self._level(i["qty"]) == 1)))
-        self.stat_labels["out"].setText(str(sum(1 for i in self.items if i["qty"] == 0)))
+        self.stat_labels["low"].setText(str(sum(1 for i in self.items if self._level(i) == 1)))
+        self.stat_labels["out"].setText(str(sum(1 for i in self.items if self._level(i) == 0)))
 
     # ── actions ───────────────────────────────────────────────────────────────
 
@@ -568,9 +804,31 @@ class InventoryApp(QMainWindow):
             self.qty_input.setValue(1)
             self.name_input.setFocus()
 
+    def _on_double_click(self):
+        it = self._selected_item()
+        if it and it["units"]:
+            self._open_units()
+        else:
+            self._checkout()
+
+    def _open_units(self):
+        it = self._selected_item()
+        if not it: return
+        self._units_dlg = UnitsDialog(self, it["id"])
+        self._units_dlg.exec_()
+        self._units_dlg = None
+
+    def _serialized_hint(self, it):
+        QMessageBox.information(self, "Tracked by serial number",
+                                f'"{it["name"]}" is tracked by serial number.\n\n'
+                                "Add, remove, or change the status of units in Serial numbers.")
+        self._open_units()
+
     def _checkout(self):
         it = self._selected_item()
         if not it: return
+        if it["units"]:
+            return self._serialized_hint(it)
         if it["qty"] == 0:
             QMessageBox.information(self, "Out of stock", f'"{it["name"]}" has no stock left.')
             return
@@ -584,6 +842,8 @@ class InventoryApp(QMainWindow):
     def _restock(self):
         it = self._selected_item()
         if not it: return
+        if it["units"]:
+            return self._serialized_hint(it)
         n, ok = QInputDialog.getInt(self, "Restock", f'Units to add to "{it["name"]}":',
                                     value=1, min=1, max=99999)
         if not ok: return
