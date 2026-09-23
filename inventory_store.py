@@ -13,19 +13,16 @@ Each item has a type, and each type has a tracking mode:
   • serial – one "unit" per serial number, each with a status (e.g. Test Bench)
   • batch  – "units" are batches: nickname + serial + quantity (e.g. Disc)
 For serial and batch items, the item's qty is derived from its units.
-
-Nothing stores an id: items are identified by name (unique), units by item
-name + nickname + serial. The in-memory "id" keys are derived from those.
 """
 
-import csv, getpass, json, os, shutil, sys
+import csv, getpass, json, os, shutil, sys, uuid
 from datetime import datetime
 
 APP_NAME = "QaveInventory"
 TIME_FMT = "%Y-%m-%d %H:%M"
 
-INV_HEADERS  = ["name", "type", "qty", "updated_at", "updated_by"]
-UNIT_HEADERS = ["item", "nickname", "serial", "qty", "status", "notes",
+INV_HEADERS  = ["id", "name", "type", "qty", "updated_at", "updated_by"]
+UNIT_HEADERS = ["id", "item_id", "item", "nickname", "serial", "qty", "status", "notes",
                 "loaned_to", "updated_at", "updated_by"]
 TYPE_HEADERS = ["name", "tracking"]
 LOG_HEADERS  = ["timestamp", "user", "action", "item", "change", "qty_after", "note"]
@@ -93,15 +90,10 @@ def load_cache():
             for k, v in (("nickname", ""), ("qty", 1), ("status", "working"),
                          ("notes", ""), ("loaned_to", "")):
                 u.setdefault(k, v)
-    return {"items": assign_ids(items),
-            "types": raw.get("types") or [dict(t) for t in DEFAULT_TYPES]}
+    return {"items": items, "types": raw.get("types") or [dict(t) for t in DEFAULT_TYPES]}
 
 def save_cache(data):
-    def strip(d):
-        return {k: v for k, v in d.items() if k != "id"}
-    _write_json(CACHE_FILE, {
-        "items": [dict(strip(i), units=[strip(u) for u in i["units"]]) for i in data["items"]],
-        "types": data["types"]})
+    _write_json(CACHE_FILE, data)
 
 def _write_json(path, data):
     tmp = path + ".tmp"
@@ -175,20 +167,6 @@ def _to_int(text):
     except ValueError:
         return 0
 
-def item_key(name):
-    return name.strip().lower()
-
-def unit_key(item_name, serial, nickname=""):
-    return "|".join(p.strip().lower() for p in (item_name, nickname, serial))
-
-def assign_ids(items):
-    """(Re)derive the in-memory ids from names, e.g. after a rename."""
-    for it in items:
-        it["id"] = item_key(it["name"])
-        for u in it["units"]:
-            u["id"] = unit_key(it["name"], u["serial"], u.get("nickname", ""))
-    return items
-
 def tracking_of(item, types):
     """"count", "serial" or "batch" for an item, based on its type."""
     name = (item.get("type") or "").lower()
@@ -228,7 +206,7 @@ class Backend:
         return self._result(self.fetch())
 
     def _result(self, items):
-        return {"items": assign_ids(items), "types": list(self.types)}
+        return {"items": items, "types": list(self.types)}
 
     def _stamp(self, obj):
         obj["updated_at"] = _now()
@@ -290,7 +268,7 @@ class Backend:
         items = self.fetch()
         if any(i["name"].lower() == name.lower() for i in items):
             raise InventoryError(f'"{name}" already exists.')
-        item = {"id": item_key(name), "name": name, "type": type_, "qty": qty, "units": []}
+        item = {"id": str(uuid.uuid4()), "name": name, "type": type_, "qty": qty, "units": []}
         self._recount(item)
         items.append(self._stamp(item))
         self._insert([item])
@@ -354,8 +332,7 @@ class Backend:
                                  "Change its type first.")
         self._check_unit(items, it, serial, nickname)
         batch = mode == "batch"
-        unit = self._stamp({"id": unit_key(it["name"], serial, nickname if batch else ""),
-                            "serial": serial,
+        unit = self._stamp({"id": str(uuid.uuid4()), "serial": serial,
                             "nickname": nickname if batch else "", "qty": qty if batch else 1,
                             "status": "" if batch else (status or "working"),
                             "notes": notes, "loaned_to": ""})
@@ -453,7 +430,7 @@ class Backend:
         for i in local_items:
             if i["name"].lower() in names:
                 continue
-            it = {"id": item_key(i["name"]), "name": i["name"],
+            it = {"id": i.get("id") or str(uuid.uuid4()), "name": i["name"],
                   "type": i.get("type", ""), "qty": _to_int(i["qty"]),
                   "units": [dict(u) for u in i.get("units", [])]}
             self._recount(it)
@@ -500,7 +477,7 @@ class SheetsBackend(Backend):
     numbered unit or batch), "Types" (item types) and "Log" (history).
 
     Columns are found by header name, so they can be reordered in the sheet,
-    and rows can be typed in by hand. Units link to items by the item's name.
+    and rows typed in by hand get their ids filled in on fetch.
     """
     kind = "sheets"
 
@@ -564,7 +541,8 @@ class SheetsBackend(Backend):
             r.get("values", []) for r in self.book.values_batch_get(
                 [f"'{ws.title}'" for ws in (self.inv, self.units, self.types_ws)])["valueRanges"])
         c, uc = self._cols, self._unit_cols
-        items, self._rows, self._unit_rows, fixes = [], {}, {}, []
+        items, self._rows, self._unit_rows = [], {}, {}
+        fixes, unit_fixes = [], []
 
         def cells(row, cols):
             return {h: (row[i - 1].strip() if i <= len(row) else "") for h, i in cols.items()}
@@ -579,21 +557,30 @@ class SheetsBackend(Backend):
 
         for r, row in enumerate(inv_vals[1:], start=2):
             cell = cells(row, c)
-            item_id = item_key(cell["name"])
-            if not cell["name"] or item_id in self._rows:  # blank, or a duplicate name
+            if not cell["name"]:
                 continue
+            item_id = cell["id"]
+            if not item_id or item_id in self._rows:     # typed by hand or copy-pasted
+                item_id = str(uuid.uuid4())
+                fixes.append({"range": rowcol_to_a1(r, c["id"]), "values": [[item_id]]})
             items.append({"id": item_id, "name": cell["name"], "type": cell["type"],
                           "qty": _to_int(cell["qty"]), "units": [],
                           "updated_at": cell["updated_at"], "updated_by": cell["updated_by"]})
             self._rows[item_id] = r
 
-        by_name = {i["id"]: i for i in items}
+        by_id = {i["id"]: i for i in items}
+        by_name = {i["name"].lower(): i for i in items}
         for r, row in enumerate(unit_vals[1:], start=2):
             cell = cells(row, uc)
-            it = by_name.get(item_key(cell["item"]))
-            unit_id = unit_key(cell["item"], cell["serial"], cell["nickname"])
-            if not cell["serial"] or it is None or unit_id in self._unit_rows:
+            it = by_id.get(cell["item_id"]) or by_name.get(cell["item"].lower())
+            if not cell["serial"] or it is None:
                 continue
+            unit_id = cell["id"]
+            if not unit_id or unit_id in self._unit_rows:
+                unit_id = str(uuid.uuid4())
+                unit_fixes.append({"range": rowcol_to_a1(r, uc["id"]), "values": [[unit_id]]})
+            if cell["item_id"] != it["id"]:              # linked by name when typed by hand
+                unit_fixes.append({"range": rowcol_to_a1(r, uc["item_id"]), "values": [[it["id"]]]})
             it["units"].append({"id": unit_id, "serial": cell["serial"], "nickname": cell["nickname"],
                                 "qty": _to_int(cell["qty"]) if cell["qty"] else 1,
                                 "status": cell["status"].lower(), "notes": cell["notes"],
@@ -612,6 +599,8 @@ class SheetsBackend(Backend):
                               "values": [[it["qty"]]]})
         if fixes:
             self.inv.batch_update(fixes, value_input_option="RAW")
+        if unit_fixes:
+            self.units.batch_update(unit_fixes, value_input_option="RAW")
         return items
 
     def _insert(self, items):
@@ -630,7 +619,7 @@ class SheetsBackend(Backend):
         self.inv.delete_rows(self._rows[item["id"]])
 
     def _unit_values(self, item, unit):
-        return dict(unit, item=item["name"])
+        return dict(unit, item_id=item["id"], item=item["name"])
 
     def _insert_units(self, item, units):
         rows = [self._as_row(self._unit_cols, self._unit_values(item, u)) for u in units]
@@ -642,7 +631,7 @@ class SheetsBackend(Backend):
         for u in units:
             r, vals = self._unit_rows[u["id"]], self._unit_values(item, u)
             data += [{"range": rowcol_to_a1(r, self._unit_cols[h]), "values": [[vals.get(h, "")]]}
-                     for h in UNIT_HEADERS]
+                     for h in UNIT_HEADERS[2:]]
         self.units.batch_update(data, value_input_option="RAW")
 
     def _delete_units(self, units):
