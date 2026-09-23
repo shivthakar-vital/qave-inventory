@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# PyInstaller output
+build/
+dist/
+*.spec
+
+# Local data & secrets — never commit these
+inventory_data.json
+service_account.json
+*.json.tmp
+log.csv
+
+.DS_Store
