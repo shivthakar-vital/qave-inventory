@@ -108,19 +108,23 @@ Every movement, with its note, is recorded in the **Log** tab.
 
 **Inventory** tab: one row per item
 
-| id | name | type | qty | updated_at | updated_by |
-|----|------|------|-----|------------|------------|
+| name | type | qty | updated_at | updated_by |
+|------|------|-----|------------|------------|
 
 **Units** tab: one row per serial-numbered unit or batch
 
-| id | item_id | item | nickname | serial | qty | status | notes | loaned_to | updated_at | updated_by |
-|----|---------|------|----------|--------|-----|--------|-------|-----------|------------|------------|
+| item | nickname | serial | qty | status | notes | loaned_to | updated_at | updated_by |
+|------|----------|--------|-----|--------|-------|-----------|------------|------------|
 
 **Types** tab: `name` and `tracking` (`serial`, `batch`, or `count`)
 
+Items are identified by **name** (names are unique), and each unit links to its item
+through the `item` column, which the app keeps in sync when you rename an item.
+
 You can edit the sheet by hand. Change a `qty` or add a row with just a `name` and a
-`qty`, and the app picks it up on the next sync (it fills in the `id` itself). On the
-Units tab, a row with just `item` (the item's name) and `serial` works too (plus `qty` for batches).
+`qty`, and the app picks it up on the next sync. On the Units tab, a row with just
+`item` and `serial` works too (plus `qty` for batches). If two Inventory rows have the
+same name, only the first is used.
 Columns are matched by header name, so you can reorder them or add your own columns next to them.
 
 ## Where data is stored

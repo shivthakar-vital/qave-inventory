@@ -1214,9 +1214,20 @@ class InventoryApp(QMainWindow):
                     f"As a {type_}, its quantity will come from the {what} you add. Continue?",
                     QMessageBox.Yes | QMessageBox.No)
                 if reply != QMessageBox.Yes: return
-        item_id = it["id"]
-        then = (lambda d: self._open_units_for(item_id)) if new_mode != old_mode and new_mode != "count" else None
+        item_id, open_units = it["id"], new_mode != old_mode and new_mode != "count"
+
+        def then(data):
+            new_id = store.item_key(name)          # ids follow the name
+            self._select(new_id)
+            if open_units:
+                self._open_units_for(new_id)
         self._do(lambda: self.backend.edit_item(item_id, name, type_), f'Saved "{name}".', then=then)
+
+    def _select(self, item_id):
+        for r in range(self.table.rowCount()):
+            if self.table.item(r, 0).data(Qt.UserRole) == item_id:
+                self.table.selectRow(r)
+                return
 
     def _remove(self):
         it = self._selected_item()
