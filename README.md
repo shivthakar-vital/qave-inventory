@@ -8,10 +8,13 @@ so several people can use the app at once and anyone can view the data in the br
 
 ## Features
 
-- Add, check out, restock, rename, and remove items (double-click a row to check out)
-- **Optional serial numbers**: track equipment unit by unit (e.g. `HT-12005`), each with
-  a status (**working**, **broken**, **in repairs**, **dormant**) and notes. Select an item
-  and click **Serial numbers…**
+- Add, check out, restock/return, edit, and remove items (double-click a row to check out)
+- **Item types** (Test Bench, TBox, Instruments, Cables, Disc, …) decide how an item is
+  tracked: by **serial number**, in **batches**, or by **count**. Add new types from the
+  Type dropdown with **+ New type…**
+- **Serial-numbered items** are loaned out unit by unit, with a note of where each one went.
+  Each unit has a status: working, loaned, broken, in repairs, or dormant
+- **Batches** (e.g. discs): each has a nickname, serial number, and quantity
 - Low-stock and out-of-stock highlighting, with an adjustable alert level
 - Search box, plus a "Last change" column showing who changed each item and when
 - **Google Sheets sync**: the sheet acts as the database. The app pulls changes every
@@ -63,7 +66,7 @@ share the sheet with. This is a one-time setup, about 10 minutes.
 7. **Configure the app.** In the app, click **⚙ Settings**, paste the sheet link, click
    **Choose key file…**, pick the JSON file, then click **Save**.
 
-The app creates **Inventory**, **Units**, and **Log** tabs. If you were already using the
+The app creates **Inventory**, **Units**, **Types**, and **Log** tabs. If you were already using the
 app locally and the sheet is empty, it offers to upload your existing items.
 
 Each teammate installs the app and repeats step 7 with the same link and key file.
@@ -72,32 +75,52 @@ Each teammate installs the app and repeats step 7 with the same link and key fil
 > your Google Workspace admin may need to allow it, or create the service account in the
 > company's Google Cloud organization.
 
-## Serial numbers
+## Types and tracking
 
-Most items are simply counted. For equipment where each unit matters, select the item
-and click **Serial numbers…** (or double-click it once it has serials) to add units. Each
-unit has a serial number, a status, and optional notes. Change a status right from the
-dropdown in the list, and it saves immediately.
+Every item has a **Type**, and each type is tracked one of three ways:
 
-Once an item has serial numbers, its quantity is the number of units. Its colour in the
-main list reflects how many units work: green if all do, amber if some don't, and red if
-none do. Search matches serial numbers too.
+| Tracking | Default types | How it works |
+|----------|---------------|--------------|
+| Serial number per unit | Test Bench, TBox, Instruments | Each unit has its own serial number (e.g. `HT-12005`) and status |
+| Batches | Disc | Each batch has a nickname, serial number, and quantity (e.g. `IM3.3 · 1000233-01 A · 10`) |
+| Count only | Cables | Just a quantity |
+
+To add a type, pick **+ New type…** at the bottom of the Type dropdown, then name it and
+choose how it's tracked. It's saved to the sheet's **Types** tab, so everyone gets it. To
+rename or delete a type, edit the Types tab directly.
+
+For serial and batch items, the quantity comes from the units or batches. Select the
+item and click **Serial numbers…** or **Batches…** to add, edit, or remove them. On a
+serial number, you can also change the status straight from the dropdown. To change an
+item's name or type, use **Edit…**.
+
+### Checking out and returning
+
+| Type | − Check out | + Restock / ↩ Return |
+|------|-------------|----------------------|
+| Serial number | Pick the serial number, note where it's going. It's marked **loaned** | Pick a loaned unit and set its condition (working, broken, …) |
+| Batches | Pick the batch, choose how many, add an optional note | Pick the batch and choose how many |
+| Count | Choose how many, add an optional note | Choose how many |
+
+Every movement, with its note, is recorded in the **Log** tab.
 
 ### Sheet format
 
 **Inventory** tab: one row per item
 
-| id | name | qty | updated_at | updated_by |
-|----|------|-----|------------|------------|
+| id | name | type | qty | updated_at | updated_by |
+|----|------|------|-----|------------|------------|
 
-**Units** tab: one row per serial-numbered unit
+**Units** tab: one row per serial-numbered unit or batch
 
-| id | item_id | item | serial | status | notes | updated_at | updated_by |
-|----|---------|------|--------|--------|-------|------------|------------|
+| id | item_id | item | nickname | serial | qty | status | notes | loaned_to | updated_at | updated_by |
+|----|---------|------|----------|--------|-----|--------|-------|-----------|------------|------------|
+
+**Types** tab: `name` and `tracking` (`serial`, `batch`, or `count`)
 
 You can edit the sheet by hand. Change a `qty` or add a row with just a `name` and a
 `qty`, and the app picks it up on the next sync (it fills in the `id` itself). On the
-Units tab, a row with just `item` (the item's name), `serial`, and `status` works too.
+Units tab, a row with just `item` (the item's name) and `serial` works too (plus `qty` for batches).
 Columns are matched by header name, so you can reorder them or add your own columns next to them.
 
 ## Where data is stored
