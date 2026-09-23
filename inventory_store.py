@@ -13,6 +13,9 @@ Each item has a type, and each type has a tracking mode:
   • serial – one "unit" per serial number, each with a status (e.g. Test Bench)
   • batch  – "units" are batches: nickname + serial + quantity (e.g. Disc)
 For serial and batch items, the item's qty is derived from its units.
+
+Orders track stock that has been ordered but not yet received: quantity,
+where to order it (link), and a note. Receiving an order adds the stock.
 """
 
 import csv, getpass, json, os, shutil, sys, uuid
@@ -21,10 +24,12 @@ from datetime import datetime
 APP_NAME = "QaveInventory"
 TIME_FMT = "%Y-%m-%d %H:%M"
 
-INV_HEADERS  = ["id", "name", "type", "qty", "updated_at", "updated_by"]
+INV_HEADERS  = ["id", "name", "type", "qty", "order_link", "updated_at", "updated_by"]
 UNIT_HEADERS = ["id", "item_id", "item", "nickname", "serial", "qty", "status", "notes",
                 "loaned_to", "updated_at", "updated_by"]
 TYPE_HEADERS = ["name", "tracking"]
+ORDER_HEADERS = ["id", "item_id", "item", "qty", "link", "note", "status",
+                 "ordered_at", "ordered_by", "received_at", "received_by"]
 LOG_HEADERS  = ["timestamp", "user", "action", "item", "change", "qty_after", "note"]
 
 TRACKING = {"count":  "Count only",
@@ -86,11 +91,13 @@ def load_cache():
     items = [i for i in raw.get("items", []) if isinstance(i, dict) and i.get("name")]
     for i in items:
         i.setdefault("type", "")
+        i.setdefault("order_link", "")
         for u in i.setdefault("units", []):
             for k, v in (("nickname", ""), ("qty", 1), ("status", "working"),
                          ("notes", ""), ("loaned_to", "")):
                 u.setdefault(k, v)
-    return {"items": items, "types": raw.get("types") or [dict(t) for t in DEFAULT_TYPES]}
+    return {"items": items, "types": raw.get("types") or [dict(t) for t in DEFAULT_TYPES],
+            "orders": raw.get("orders", [])}
 
 def save_cache(data):
     _write_json(CACHE_FILE, data)
@@ -189,6 +196,7 @@ class Backend:
     def __init__(self, user):
         self.user = user or getpass.getuser()
         self.types = [dict(t) for t in DEFAULT_TYPES]
+        self.orders = []
 
     # Subclasses implement these. Operations mutate the list returned by
     # fetch() first, then call the matching primitive to persist the change.
@@ -200,13 +208,15 @@ class Backend:
     def _update_units(self, item, units): raise NotImplementedError
     def _delete_units(self, units): raise NotImplementedError
     def _insert_type(self, t): raise NotImplementedError
+    def _insert_order(self, order): raise NotImplementedError
+    def _update_orders(self, orders): raise NotImplementedError
     def _log(self, action, name, change, qty_after, note=""): raise NotImplementedError
 
     def load(self):
         return self._result(self.fetch())
 
     def _result(self, items):
-        return {"items": items, "types": list(self.types)}
+        return {"items": items, "types": list(self.types), "orders": list(self.orders)}
 
     def _stamp(self, obj):
         obj["updated_at"] = _now()
@@ -287,7 +297,7 @@ class Backend:
         self._log("check out" if delta < 0 else "restock", it["name"], f"{delta:+d}", it["qty"], note)
         return self._result(items)
 
-    def edit_item(self, item_id, name, type_):
+    def edit_item(self, item_id, name, type_, order_link=None):
         items = self.fetch()
         it = self._find(items, item_id)
         if any(i["name"].lower() == name.lower() and i["id"] != item_id for i in items):
@@ -301,13 +311,23 @@ class Backend:
             diff.append(f'{it["name"]} → {name}')
         if type_ != it.get("type", ""):
             diff.append(f'type: {it.get("type") or "—"} → {type_ or "—"}')
+        if order_link is not None and order_link != it.get("order_link", ""):
+            diff.append("order link")
+            it["order_link"] = order_link
         if not diff:
             return self._result(items)
+        renamed = name != it["name"]
         it["name"], it["type"] = name, type_
         self._recount(it)
         self._update(self._stamp(it))
         if it["units"]:
             self._update_units(it, it["units"])
+        if renamed:
+            mine = [o for o in self.orders if o["item_id"] == it["id"]]
+            for o in mine:
+                o["item"] = name
+            if mine:
+                self._update_orders(mine)
         self._log("edit", name, "; ".join(diff), it["qty"])
         return self._result(items)
 
@@ -418,7 +438,73 @@ class Backend:
                   f"{delta:+d}", it["qty"], note)
         return self._result(items)
 
-    def upload(self, local_items, local_types=()):
+    # ── orders ──
+
+    def _find_order(self, order_id):
+        o = next((o for o in self.orders if o["id"] == order_id), None)
+        if o is None:
+            raise InventoryError("That order no longer exists.")
+        if o["status"] != "ordered":
+            raise InventoryError(f'That order was already marked {o["status"]}.')
+        return o
+
+    def add_order(self, item_id, qty, link="", note="", save_link=True):
+        items = self.fetch()
+        it = self._find(items, item_id)
+        if save_link and link and link != it.get("order_link", ""):
+            it["order_link"] = link
+            self._update(self._stamp(it))
+        order = {"id": str(uuid.uuid4()), "item_id": it["id"], "item": it["name"], "qty": qty,
+                 "link": link, "note": note, "status": "ordered", "ordered_at": _now(),
+                 "ordered_by": self.user, "received_at": "", "received_by": ""}
+        self.orders.append(order)
+        self._insert_order(order)
+        self._log("order", it["name"], f"{qty} ordered", it["qty"], note)
+        return self._result(items)
+
+    def receive_order(self, order_id, qty=None, unit_id=None, new_batch=None):
+        """Mark an order received and add its stock.
+
+        count items: qty is added. batch items: added to batch unit_id, or to a
+        new batch new_batch=(nickname, serial). serial items: no stock change;
+        the new units are added with their serial numbers afterwards.
+        """
+        items = self.fetch()
+        o = self._find_order(order_id)
+        it = self._find(items, o["item_id"])
+        qty = o["qty"] if qty is None else qty
+        mode = self._tracking(it)
+        if mode == "count":
+            it["qty"] += qty
+        elif mode == "batch":
+            if new_batch:
+                nickname, serial = new_batch
+                self._check_unit(items, it, serial, nickname)
+                u = self._stamp({"id": str(uuid.uuid4()), "serial": serial, "nickname": nickname,
+                                 "qty": qty, "status": "", "notes": "", "loaned_to": ""})
+                it["units"].append(u)
+                self._insert_units(it, [u])
+            else:
+                u = self._stamp(self._find_unit(it, unit_id))
+                u["qty"] += qty
+                self._update_units(it, [u])
+            self._recount(it)
+        if mode != "serial":
+            self._update(self._stamp(it))
+        o.update(status="received", qty=qty, received_at=_now(), received_by=self.user)
+        self._update_orders([o])
+        self._log("received", it["name"], f"+{qty}", it["qty"], o["note"])
+        return self._result(items)
+
+    def cancel_order(self, order_id):
+        items = self.fetch()
+        o = self._find_order(order_id)
+        o.update(status="cancelled", received_at=_now(), received_by=self.user)
+        self._update_orders([o])
+        self._log("cancel order", o["item"], f'{o["qty"]} cancelled', "", o["note"])
+        return self._result(items)
+
+    def upload(self, local_items, local_types=(), local_orders=()):
         """Copy items and types (e.g. from local mode) in, skipping names that exist."""
         items = self.fetch()
         for t in local_types:
@@ -432,6 +518,7 @@ class Backend:
                 continue
             it = {"id": i.get("id") or str(uuid.uuid4()), "name": i["name"],
                   "type": i.get("type", ""), "qty": _to_int(i["qty"]),
+                  "order_link": i.get("order_link", ""),
                   "units": [dict(u) for u in i.get("units", [])]}
             self._recount(it)
             new.append(self._stamp(it))
@@ -442,6 +529,12 @@ class Backend:
                 if it["units"]:
                     self._insert_units(it, it["units"])
             self._log("import", f"{len(new)} items", "", "")
+        known = {o["id"] for o in self.orders}
+        ids = {i["id"] for i in items}
+        for o in local_orders:
+            if o["id"] not in known and o["item_id"] in ids:
+                self.orders.append(dict(o))
+                self._insert_order(o)
         return self._result(items)
 
 
@@ -453,6 +546,7 @@ class LocalBackend(Backend):
     def fetch(self):
         self._data = load_cache()
         self.types = self._data["types"]
+        self.orders = self._data["orders"]
         return self._data["items"]
 
     def _save(self, *_):
@@ -460,6 +554,7 @@ class LocalBackend(Backend):
 
     _insert = _update = _delete = _save
     _insert_units = _update_units = _delete_units = _insert_type = _save
+    _insert_order = _update_orders = _save
 
     def _log(self, action, name, change, qty_after, note=""):
         new = not os.path.exists(LOCAL_LOG)
@@ -489,11 +584,12 @@ class SheetsBackend(Backend):
         self.inv, self._cols = self._tab("Inventory", INV_HEADERS)
         self.units, self._unit_cols = self._tab("Units", UNIT_HEADERS)
         self.types_ws, self._type_cols = self._tab("Types", TYPE_HEADERS)
+        self.orders_ws, self._order_cols = self._tab("Orders", ORDER_HEADERS)
         self.log, self._log_cols = self._tab("Log", LOG_HEADERS)
         if len(self.types_ws.get_all_values()) <= 1:          # new sheet: add default types
             self.types_ws.append_rows([self._as_row(self._type_cols, t) for t in DEFAULT_TYPES],
                                       value_input_option="RAW", table_range="A1")
-        self._rows, self._unit_rows = {}, {}
+        self._rows, self._unit_rows, self._order_rows = {}, {}, {}
 
     def _tab(self, title, headers):
         import gspread
@@ -537,9 +633,10 @@ class SheetsBackend(Backend):
 
     def fetch(self):
         from gspread.utils import rowcol_to_a1
-        inv_vals, unit_vals, type_vals = (
+        inv_vals, unit_vals, type_vals, order_vals = (
             r.get("values", []) for r in self.book.values_batch_get(
-                [f"'{ws.title}'" for ws in (self.inv, self.units, self.types_ws)])["valueRanges"])
+                [f"'{ws.title}'" for ws in (self.inv, self.units, self.types_ws, self.orders_ws)]
+            )["valueRanges"])
         c, uc = self._cols, self._unit_cols
         items, self._rows, self._unit_rows = [], {}, {}
         fixes, unit_fixes = [], []
@@ -564,7 +661,7 @@ class SheetsBackend(Backend):
                 item_id = str(uuid.uuid4())
                 fixes.append({"range": rowcol_to_a1(r, c["id"]), "values": [[item_id]]})
             items.append({"id": item_id, "name": cell["name"], "type": cell["type"],
-                          "qty": _to_int(cell["qty"]), "units": [],
+                          "qty": _to_int(cell["qty"]), "units": [], "order_link": cell["order_link"],
                           "updated_at": cell["updated_at"], "updated_by": cell["updated_by"]})
             self._rows[item_id] = r
 
@@ -599,10 +696,35 @@ class SheetsBackend(Backend):
             if it["qty"] != before:
                 fixes.append({"range": rowcol_to_a1(self._rows[it["id"]], c["qty"]),
                               "values": [[it["qty"]]]})
+        oc, order_fixes = self._order_cols, []
+        self.orders, self._order_rows = [], {}
+        for r, row in enumerate(order_vals[1:], start=2):
+            cell = cells(row, oc)
+            it = by_id.get(cell["item_id"]) or by_name.get(cell["item"].lower())
+            if not (cell["item"] or it):
+                continue
+            order_id = cell["id"]
+            if not order_id or order_id in self._order_rows:
+                order_id = str(uuid.uuid4())
+                order_fixes.append({"range": rowcol_to_a1(r, oc["id"]), "values": [[order_id]]})
+            if it and cell["item_id"] != it["id"]:
+                order_fixes.append({"range": rowcol_to_a1(r, oc["item_id"]), "values": [[it["id"]]]})
+            if it and cell["item"] != it["name"]:
+                order_fixes.append({"range": rowcol_to_a1(r, oc["item"]), "values": [[it["name"]]]})
+            status = cell["status"].lower() or "ordered"
+            self.orders.append(dict(cell, id=order_id, item_id=it["id"] if it else cell["item_id"],
+                                    item=it["name"] if it else cell["item"],
+                                    qty=_to_int(cell["qty"]) or 1,
+                                    status=status if status in ("ordered", "received", "cancelled")
+                                    else "ordered"))
+            self._order_rows[order_id] = r
+
         if fixes:
             self.inv.batch_update(fixes, value_input_option="RAW")
         if unit_fixes:
             self.units.batch_update(unit_fixes, value_input_option="RAW")
+        if order_fixes:
+            self.orders_ws.batch_update(order_fixes, value_input_option="RAW")
         return items
 
     def _insert(self, items):
@@ -614,7 +736,7 @@ class SheetsBackend(Backend):
         r = self._rows[item["id"]]
         self.inv.batch_update(
             [{"range": rowcol_to_a1(r, self._cols[h]), "values": [[item.get(h, "")]]}
-             for h in ("name", "type", "qty", "updated_at", "updated_by")],
+             for h in ("name", "type", "qty", "order_link", "updated_at", "updated_by")],
             value_input_option="RAW")
 
     def _delete(self, item):
@@ -639,6 +761,18 @@ class SheetsBackend(Backend):
     def _delete_units(self, units):
         for r in sorted((self._unit_rows[u["id"]] for u in units), reverse=True):
             self.units.delete_rows(r)       # bottom-up so row numbers stay valid
+
+    def _insert_order(self, order):
+        self.orders_ws.append_row(self._as_row(self._order_cols, order),
+                                  value_input_option="RAW", table_range="A1")
+
+    def _update_orders(self, orders):
+        from gspread.utils import rowcol_to_a1
+        self.orders_ws.batch_update(
+            [{"range": rowcol_to_a1(self._order_rows[o["id"]], self._order_cols[h]),
+              "values": [[o.get(h, "")]]}
+             for o in orders for h in ORDER_HEADERS[2:]],
+            value_input_option="RAW")
 
     def _insert_type(self, t):
         self.types_ws.append_row(self._as_row(self._type_cols, t),

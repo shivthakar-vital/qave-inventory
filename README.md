@@ -16,6 +16,8 @@ so several people can use the app at once and anyone can view the data in the br
 - **Serial-numbered items** are loaned out unit by unit, with a note of where each one went.
   Each unit has a status: working, loaned, broken, in repairs, or dormant
 - **Batches** (e.g. discs): each has a nickname, serial number, and quantity
+- **Orders**: record what's been ordered (quantity, where to order it, and a note), see
+  everything on order, and mark orders received to add the stock automatically
 - Low-stock and out-of-stock highlighting, with an adjustable alert level
 - Search box, plus a "Last change" column showing who changed each item and when
 - **Google Sheets sync**: the sheet acts as the database. The app pulls changes every
@@ -75,7 +77,7 @@ share the sheet with. This is a one-time setup, about 10 minutes.
 7. **Configure the app.** In the app, click **⚙ Settings**, paste the sheet link, click
    **Choose key file…**, pick the JSON file, then click **Save**.
 
-The app creates **Inventory**, **Units**, **Types**, and **Log** tabs. If you were already using the
+The app creates **Inventory**, **Units**, **Types**, **Orders**, and **Log** tabs. If you were already using the
 app locally and the sheet is empty, it offers to upload your existing items.
 
 Each teammate installs the app and repeats step 7 with the same link and key file.
@@ -113,12 +115,27 @@ item's name or type, use **Edit…**.
 
 Every movement, with its note, is recorded in the **Log** tab.
 
+### Orders
+
+Select an item and click **🛒 Order…** to record an order. Enter how many were ordered,
+the link to order from, and an optional note (vendor, PO number, expected date). The link
+is remembered on the item, so it's pre-filled next time. You can also set it with **Edit…**.
+
+Items on order show "· N on order" in the main list, and the **On order** card counts open
+orders. Click **Orders** (top right) to see them all. From there you can:
+
+- **✓ Mark received…** to enter how many arrived. Counted items get that many added.
+  Discs are added to a batch you pick, or to a new batch. Serial-numbered items open the
+  Serial numbers window so you can add the new units.
+- **Open link** to reorder.
+- **Cancel order** if it isn't coming.
+
 ### Sheet format
 
 **Inventory** tab: one row per item
 
-| id | name | type | qty | updated_at | updated_by |
-|----|------|------|-----|------------|------------|
+| id | name | type | qty | order_link | updated_at | updated_by |
+|----|------|------|-----|------------|------------|------------|
 
 **Units** tab: one row per serial-numbered unit or batch
 
@@ -127,12 +144,20 @@ Every movement, with its note, is recorded in the **Log** tab.
 
 **Types** tab: `name` and `tracking` (`serial`, `batch`, or `count`)
 
+**Orders** tab: one row per order
+
+| id | item_id | item | qty | link | note | status | ordered_at | ordered_by | received_at | received_by |
+|----|---------|------|-----|------|------|--------|------------|------------|-------------|-------------|
+
+`status` is `ordered`, `received`, or `cancelled`.
+
 You can edit the sheet by hand, and you never need to fill in the `id` columns:
 
 - **Add an item:** a row with just a `name` (plus `type` and `qty`) works.
 - **Add a unit or batch:** on the Units tab, `item` (the item's name) and `serial` are
   enough (plus `nickname` and `qty` for batches).
-- **Rename an item:** just change its `name`. Its units stay linked through `item_id`.
+- **Add an order:** on the Orders tab, `item` and `qty` are enough (plus `link` and `note`).
+- **Rename an item:** just change its `name`. Its units and orders stay linked through `item_id`.
 
 On the next sync, the app fills in missing `id` / `item_id` values, gives copy-pasted rows
 a fresh `id`, and updates the Units tab's `item` column to match renamed items.

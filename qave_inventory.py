@@ -20,15 +20,15 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QLineEdit, QPushButton, QTableWidget, QTableWidgetItem,
     QHeaderView, QMessageBox, QFrame, QDialog, QFormLayout,
-    QDialogButtonBox, QFileDialog, QSpinBox, QShortcut, QComboBox
+    QDialogButtonBox, QFileDialog, QSpinBox, QShortcut, QComboBox, QCheckBox
 )
-from PyQt5.QtCore import Qt, QObject, QRunnable, QThreadPool, QTimer, pyqtSignal
-from PyQt5.QtGui import QFont, QColor, QPalette, QKeySequence
+from PyQt5.QtCore import Qt, QObject, QRunnable, QThreadPool, QTimer, QUrl, pyqtSignal
+from PyQt5.QtGui import QFont, QColor, QPalette, QKeySequence, QDesktopServices
 
 import inventory_store as store
 
 APP_TITLE   = "Qave Inventory"
-APP_VERSION = "1.0.2"         # bump this for each release, then push a matching tag (v1.0.2)
+APP_VERSION = "1.0.3"         # bump this for each release, then push a matching tag (v1.0.3)
 REFRESH_MS = 60_000          # pull changes from the sheet every minute
 
 INK, MUTED = "#1A1A18", "#999996"
@@ -302,7 +302,9 @@ class ItemDialog(QDialog):
         self.setMinimumWidth(420)
         self.name = QLineEdit(it["name"])
         self.type = TypeCombo(win, it.get("type", ""))
-        _form_dialog(self, [("Name", self.name), ("Type", self.type)], "Save")
+        self.link = QLineEdit(it.get("order_link", ""))
+        self.link.setPlaceholderText("Optional: where to order more")
+        _form_dialog(self, [("Name", self.name), ("Type", self.type), ("Order link", self.link)], "Save")
 
     def accept(self):
         if not self.name.text().strip():
@@ -311,7 +313,7 @@ class ItemDialog(QDialog):
         super().accept()
 
     def values(self):
-        return self.name.text().strip(), self.type.type_name()
+        return self.name.text().strip(), self.type.type_name(), self.link.text().strip()
 
 
 # ── serial numbers & batches ──────────────────────────────────────────────────
@@ -556,6 +558,209 @@ class UnitsDialog(QDialog):
         self.win._do(lambda: self.win.backend.remove_unit(self.item_id, unit_id), f"Removed {what}.")
 
 
+# ── orders ────────────────────────────────────────────────────────────────────
+
+def _open_link(url):
+    url = url.strip()
+    if url and "://" not in url:
+        url = "https://" + url
+    if url:
+        QDesktopServices.openUrl(QUrl(url))
+
+def _link_label(url):
+    """A clickable, shortened link for a table cell."""
+    lbl = QLabel()
+    if url.strip():
+        full = url if "://" in url else "https://" + url
+        short = QUrl(full).host().removeprefix("www.") or url
+        lbl.setText(f'<a href="{full}" style="color:{ACCENT};">{short} ↗</a>')
+        lbl.setToolTip(url)
+        lbl.setOpenExternalLinks(True)
+    lbl.setStyleSheet("padding-left: 12px;")
+    return lbl
+
+
+class OrderDialog(QDialog):
+    """Record that more of an item has been ordered."""
+
+    def __init__(self, parent, it):
+        super().__init__(parent)
+        self.setWindowTitle(f'Order — {it["name"]}')
+        self.setMinimumWidth(500)
+        self.qty = QSpinBox()
+        self.qty.setRange(1, 999999)
+        self.link = QLineEdit(it.get("order_link", ""))
+        self.link.setPlaceholderText("Where to order it, e.g. https://www.digikey.com/…")
+        self.save_link = QCheckBox("Remember this link for next time")
+        self.save_link.setChecked(True)
+        self.note = QLineEdit()
+        self.note.setPlaceholderText("Optional, e.g. vendor, PO number, expected date")
+        _form_dialog(self, [("Quantity ordered", self.qty), ("Order link", self.link),
+                            ("", self.save_link), ("Note", self.note)], "Mark ordered")
+
+    def values(self):
+        return dict(qty=self.qty.value(), link=self.link.text().strip(),
+                    note=self.note.text().strip(), save_link=self.save_link.isChecked())
+
+
+class ReceiveDialog(QDialog):
+    """Mark an order received: how many arrived, and (for discs) which batch they go in."""
+
+    NEW = "__new__"
+
+    def __init__(self, parent, order, it, mode):
+        super().__init__(parent)
+        self.setWindowTitle(f'Receive — {it["name"]}')
+        self.setMinimumWidth(460)
+        self.batch = None
+        rows = []
+        if mode == "batch":
+            self.batch = QComboBox()
+            for u in sorted(it["units"], key=lambda u: (u["nickname"].lower(), u["serial"].lower())):
+                self.batch.addItem(f'{u["nickname"]} · {u["serial"]}  ({u["qty"]} now)', u["id"])
+            self.batch.addItem("+ New batch…", self.NEW)
+            self.nickname = QLineEdit()
+            self.nickname.setPlaceholderText("e.g. IM3.3")
+            self.serial = QLineEdit()
+            self.serial.setPlaceholderText("e.g. 1000233-01 A")
+            rows += [("Add to batch", self.batch), ("New batch nickname", self.nickname),
+                     ("New batch serial", self.serial)]
+            self.batch.currentIndexChanged.connect(self._toggle_new)
+        self.qty = QSpinBox()
+        self.qty.setRange(1, 999999)
+        self.qty.setValue(order["qty"])
+        rows.append(("Quantity received", self.qty))
+        _form_dialog(self, rows, "Mark received")
+        if self.batch:
+            self._toggle_new()
+
+    def _toggle_new(self):
+        new = self.batch.currentData() == self.NEW
+        for w in (self.nickname, self.serial):
+            w.setEnabled(new)
+
+    def accept(self):
+        if self.batch and self.batch.currentData() == self.NEW and not self.serial.text().strip():
+            QMessageBox.warning(self, "Missing serial", "Enter a serial number for the new batch.")
+            return
+        super().accept()
+
+    def values(self):
+        v = dict(qty=self.qty.value())
+        if self.batch:
+            if self.batch.currentData() == self.NEW:
+                v["new_batch"] = (self.nickname.text().strip(), self.serial.text().strip())
+            else:
+                v["unit_id"] = self.batch.currentData()
+        return v
+
+
+class OrdersDialog(QDialog):
+    """All orders: open ones first. Mark received, cancel, or open the order link."""
+
+    def __init__(self, win):
+        super().__init__(win)
+        self.win = win
+        self.setWindowTitle("Orders")
+        self.setMinimumSize(950, 460)
+
+        title = QLabel("Orders")
+        title.setStyleSheet("font-size:16px; font-weight:bold;")
+        self.summary = QLabel()
+        self.summary.setStyleSheet(f"color:{MUTED}; font-size:12px;")
+        self.show_all = QCheckBox("Show received and cancelled")
+        self.show_all.toggled.connect(self.refresh)
+        head = QHBoxLayout()
+        head.addWidget(self.summary, 1)
+        head.addWidget(self.show_all)
+
+        self.table = QTableWidget(0, 6)
+        self.table.setHorizontalHeaderLabels(["Item", "Qty", "Status", "Ordered", "Link", "Note"])
+        hdr = self.table.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.Stretch)
+        hdr.setSectionResizeMode(5, QHeaderView.Stretch)
+        for col, width in ((1, 60), (2, 100), (3, 190), (4, 200)):
+            hdr.setSectionResizeMode(col, QHeaderView.Fixed)
+            self.table.setColumnWidth(col, width)
+        self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(40)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setShowGrid(False)
+        self.table.setWordWrap(False)
+        self.table.setFocusPolicy(Qt.NoFocus)
+
+        receive = QPushButton("✓ Mark received…")
+        receive.setObjectName("addBtn")
+        link = QPushButton("Open link")
+        cancel = QPushButton("Cancel order")
+        cancel.setObjectName("removeBtn")
+        close = QPushButton("Close")
+        receive.clicked.connect(lambda: self._with_selected(self.win._receive_order))
+        link.clicked.connect(lambda: self._with_selected(lambda o: _open_link(o["link"])))
+        cancel.clicked.connect(lambda: self._with_selected(self.win._cancel_order))
+        close.clicked.connect(self.accept)
+        btns = QHBoxLayout()
+        for b in (receive, link, cancel):
+            btns.addWidget(b)
+        btns.addStretch()
+        btns.addWidget(close)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 16, 20, 16)
+        root.setSpacing(10)
+        root.addWidget(title)
+        root.addLayout(head)
+        root.addWidget(self.table)
+        root.addLayout(btns)
+        self.refresh()
+
+    def _with_selected(self, fn):
+        row = self.table.currentRow()
+        order_id = self.table.item(row, 0).data(Qt.UserRole) if row >= 0 else None
+        o = next((o for o in self.win.orders if o["id"] == order_id), None)
+        if o is None:
+            QMessageBox.information(self, "No selection", "Select an order first.")
+            return
+        fn(o)
+
+    def refresh(self):
+        orders = self.win.orders
+        open_ = [o for o in orders if o["status"] == "ordered"]
+        self.summary.setText(f"{len(open_)} open order(s)" if open_ else "No open orders.")
+        newest = lambda o: o.get("received_at") or o.get("ordered_at", "")
+        shown = sorted(open_, key=newest, reverse=True)          # open orders first, newest on top
+        if self.show_all.isChecked():
+            shown += sorted((o for o in orders if o["status"] != "ordered"), key=newest, reverse=True)
+        row = self.table.currentRow()
+        keep = self.table.item(row, 0).data(Qt.UserRole) if row >= 0 and self.table.item(row, 0) else None
+
+        self.table.setRowCount(len(shown))
+        colors = {"ordered": UNIT_COLORS["loaned"], "received": GREEN, "cancelled": MUTED}
+        for r, o in enumerate(shown):
+            item = QTableWidgetItem(o["item"])
+            item.setData(Qt.UserRole, o["id"])
+            item.setFont(QFont("Helvetica", 13, QFont.Bold))
+            qty = QTableWidgetItem(str(o["qty"]))
+            qty.setTextAlignment(Qt.AlignCenter)
+            status = QTableWidgetItem("on order" if o["status"] == "ordered" else o["status"])
+            status.setForeground(QColor(colors.get(o["status"], INK)))
+            if o["status"] != "ordered" and o.get("received_at"):
+                status.setToolTip(f'{o["status"]} {o["received_at"]} by {o.get("received_by", "")}')
+            when, who = _ago(o.get("ordered_at", "")), o.get("ordered_by", "")
+            ordered = QTableWidgetItem(f"{when} · {who}" if when and who else when or who)
+            ordered.setForeground(QColor(MUTED))
+            ordered.setToolTip(o.get("ordered_at", ""))
+            note = QTableWidgetItem(o.get("note", ""))
+            note.setToolTip(o.get("note", ""))
+            for c, cell in ((0, item), (1, qty), (2, status), (3, ordered), (5, note)):
+                self.table.setItem(r, c, cell)
+            self.table.setCellWidget(r, 4, _link_label(o.get("link", "")))
+            if o["id"] == keep:
+                self.table.selectRow(r)
+
+
 # ── check out / return ────────────────────────────────────────────────────────
 
 class MoveDialog(QDialog):
@@ -654,13 +859,13 @@ class InventoryApp(QMainWindow):
 
         self.cfg = store.load_config()
         cached = store.load_cache()         # shown right away, refreshed once connected
-        self.items, self.types = cached["items"], cached["types"]
+        self.items, self.types, self.orders = cached["items"], cached["types"], cached["orders"]
         self.backend = None
         self.last_sync = None
         self.pool = QThreadPool(self)
         self.pool.setMaxThreadCount(1)
         self._tasks = set()
-        self._units_dlg = None
+        self._units_dlg = self._orders_dlg = None
 
         self._build_ui()
         self._refresh_table()
@@ -706,6 +911,9 @@ class InventoryApp(QMainWindow):
         self.sync_btn = QPushButton("↻ Sync")
         self.sync_btn.setToolTip("Pull the latest data from the Google Sheet")
         self.sync_btn.clicked.connect(lambda: self._sync(quiet=False))
+        self.orders_btn = QPushButton("Orders")
+        self.orders_btn.setToolTip("Everything on order: mark received, cancel, or open order links")
+        self.orders_btn.clicked.connect(self._open_orders)
         settings_btn = QPushButton("⚙ Settings")
         settings_btn.clicked.connect(self._open_settings)
 
@@ -717,8 +925,9 @@ class InventoryApp(QMainWindow):
         top.addWidget(self.qty_input, 1, 2)
         top.addWidget(self.add_btn, 1, 3)
         top.setColumnMinimumWidth(4, 20)
-        top.addWidget(self.sync_btn, 1, 5)
-        top.addWidget(settings_btn, 1, 6)
+        top.addWidget(self.orders_btn, 1, 5)
+        top.addWidget(self.sync_btn, 1, 6)
+        top.addWidget(settings_btn, 1, 7)
         top.setColumnStretch(0, 1)
         root.addLayout(top)
 
@@ -727,7 +936,8 @@ class InventoryApp(QMainWindow):
         stat_row.setSpacing(10)
         self.stat_labels = {}
         for key, title, color in [("total", "Total items", INK), ("units", "Units in stock", INK),
-                                  ("low", "Low stock / issues", AMBER), ("out", "Out of stock", RED)]:
+                                  ("low", "Low stock / issues", AMBER), ("out", "Out of stock", RED),
+                                  ("ordered", "On order", UNIT_COLORS["loaned"])]:
             card = QFrame()
             card.setStyleSheet("QFrame { background: #EEECEA; border-radius: 8px; }")
             cl = QVBoxLayout(card)
@@ -779,6 +989,9 @@ class InventoryApp(QMainWindow):
         self.btn_checkout = QPushButton("− Check out")
         self.btn_restock  = QPushButton("+ Restock")
         self.btn_edit     = QPushButton("Edit…")
+        self.btn_order    = QPushButton("🛒 Order…")
+        self.btn_order.setToolTip("Record that more of this item was ordered")
+        self.btn_order.clicked.connect(self._order)
         self.btn_units    = QPushButton("Serial numbers…")
         self.btn_remove   = QPushButton("Remove")
         self.btn_remove.setObjectName("removeBtn")
@@ -789,7 +1002,7 @@ class InventoryApp(QMainWindow):
         self.btn_edit.clicked.connect(self._edit)
         self.btn_units.clicked.connect(self._open_units)
         self.btn_remove.clicked.connect(self._remove)
-        for b in (self.btn_checkout, self.btn_restock, self.btn_edit, self.btn_units):
+        for b in (self.btn_checkout, self.btn_restock, self.btn_edit, self.btn_units, self.btn_order):
             act_row.addWidget(b)
         act_row.addStretch()
         act_row.addWidget(self.btn_remove)
@@ -809,7 +1022,7 @@ class InventoryApp(QMainWindow):
         root.addLayout(status_row)
 
         self._edit_buttons = [self.add_btn, self.btn_checkout, self.btn_restock,
-                              self.btn_edit, self.btn_remove, self.sync_btn]
+                              self.btn_edit, self.btn_order, self.btn_remove, self.sync_btn]
         self._update_buttons()
 
     # ── helpers ───────────────────────────────────────────────────────────────
@@ -837,6 +1050,9 @@ class InventoryApp(QMainWindow):
             n = len(it["units"])
             text = f'{text} · {n} batch{"es" if n != 1 else ""}' if n else "No batches yet"
         return text, color
+
+    def _open_orders_for(self, it):
+        return [o for o in self.orders if o["item_id"] == it["id"] and o["status"] == "ordered"]
 
     def _selected_id(self):
         row = self.table.currentRow()
@@ -952,7 +1168,8 @@ class InventoryApp(QMainWindow):
                                   "the connection works.")
 
     def _on_first_fetch(self, data):
-        local, local_types = [i for i in self.items if i.get("name")], list(self.types)
+        local, local_types, local_orders = ([i for i in self.items if i.get("name")],
+                                            list(self.types), list(self.orders))
         if not data["items"] and local:
             reply = QMessageBox.question(
                 self, "Empty sheet",
@@ -960,7 +1177,7 @@ class InventoryApp(QMainWindow):
                 "currently on this computer to the sheet?",
                 QMessageBox.Yes | QMessageBox.No)
             if reply == QMessageBox.Yes:
-                self._run(lambda: self.backend.upload(local, local_types),
+                self._run(lambda: self.backend.upload(local, local_types, local_orders),
                           lambda d: self._set_items(d, f"Uploaded {len(local)} item(s)."),
                           busy_msg="Uploading…")
                 return
@@ -983,7 +1200,7 @@ class InventoryApp(QMainWindow):
                   busy_msg=None if quiet else "Syncing…")
 
     def _set_items(self, data, msg=None):
-        self.items, self.types = data["items"], data["types"]
+        self.items, self.types, self.orders = data["items"], data["types"], data["orders"]
         store.save_cache(data)
         if self.backend and self.backend.kind == "sheets":
             self.last_sync = datetime.now()
@@ -993,6 +1210,8 @@ class InventoryApp(QMainWindow):
         self._update_buttons()
         if self._units_dlg:
             self._units_dlg.refresh()
+        if self._orders_dlg:
+            self._orders_dlg.refresh()
         if msg:
             self._set_status(msg(data) if callable(msg) else msg)
 
@@ -1023,6 +1242,9 @@ class InventoryApp(QMainWindow):
         for r, it in enumerate(shown):
             lbl, color = self._status(it)
             mode = self._mode(it)
+            on_order = self._open_orders_for(it)
+            if on_order:
+                lbl += f' · {sum(o["qty"] for o in on_order)} on order'
 
             name_item = QTableWidgetItem(it["name"])
             name_item.setData(Qt.UserRole, it["id"])
@@ -1035,6 +1257,10 @@ class InventoryApp(QMainWindow):
                              (f' ({u["loaned_to"]})' if u["status"] == "loaned" and u.get("loaned_to") else "")
                              for u in it["units"]]
                 name_item.setToolTip("\n".join(sorted(lines, key=str.lower)))
+            if on_order:
+                name_item.setToolTip("\n".join(filter(None, [name_item.toolTip(), "On order:"] + [
+                    f'  {o["qty"]} ({o["ordered_at"]})' + (f' — {o["note"]}' if o.get("note") else "")
+                    for o in on_order])))
 
             type_item = QTableWidgetItem(it.get("type", ""))
             type_item.setFont(QFont("Helvetica", 12))
@@ -1067,6 +1293,9 @@ class InventoryApp(QMainWindow):
         self.stat_labels["units"].setText(str(sum(i["qty"] for i in self.items)))
         self.stat_labels["low"].setText(str(sum(1 for i in self.items if self._level(i) == 1)))
         self.stat_labels["out"].setText(str(sum(1 for i in self.items if self._level(i) == 0)))
+        open_orders = [o for o in self.orders if o["status"] == "ordered"]
+        self.stat_labels["ordered"].setText(str(len(open_orders)))
+        self.orders_btn.setText(f"Orders ({len(open_orders)})" if open_orders else "Orders")
 
     # ── actions ───────────────────────────────────────────────────────────────
 
@@ -1209,7 +1438,7 @@ class InventoryApp(QMainWindow):
         if not it: return
         dlg = ItemDialog(self, it)
         if dlg.exec_() != QDialog.Accepted: return
-        name, type_ = dlg.values()
+        name, type_, link = dlg.values()
         old_mode = self._mode(it)
         new_mode = store.tracking_of(dict(it, type=type_), self.types)
         if new_mode != old_mode:
@@ -1228,7 +1457,52 @@ class InventoryApp(QMainWindow):
                 if reply != QMessageBox.Yes: return
         item_id = it["id"]
         then = (lambda d: self._open_units_for(item_id)) if new_mode != old_mode and new_mode != "count" else None
-        self._do(lambda: self.backend.edit_item(item_id, name, type_), f'Saved "{name}".', then=then)
+        self._do(lambda: self.backend.edit_item(item_id, name, type_, link), f'Saved "{name}".', then=then)
+
+    def _order(self):
+        it = self._selected_item()
+        if not it: return
+        dlg = OrderDialog(self, it)
+        if dlg.exec_() != QDialog.Accepted: return
+        item_id, name, v = it["id"], it["name"], dlg.values()
+        self._do(lambda: self.backend.add_order(item_id, **v), f'Ordered {v["qty"]}× {name}.')
+
+    def _open_orders(self):
+        self._orders_dlg = OrdersDialog(self)
+        self._orders_dlg.exec_()
+        self._orders_dlg = None
+
+    def _receive_order(self, o):
+        it = next((i for i in self.items if i["id"] == o["item_id"]), None)
+        parent = self._orders_dlg or self
+        if it is None:
+            QMessageBox.warning(parent, "Item not found",
+                                f'"{o["item"]}" is no longer in the inventory. You can cancel this order.')
+            return
+        mode, order_id = self._mode(it), o["id"]
+        if mode == "serial":
+            reply = QMessageBox.question(
+                parent, "Mark received",
+                f'Mark {o["qty"]}× "{it["name"]}" as received?\n\n'
+                "Next, add the serial numbers of the new units.", QMessageBox.Yes | QMessageBox.No)
+            if reply != QMessageBox.Yes: return
+            item_id = it["id"]
+            self._do(lambda: self.backend.receive_order(order_id), f'Received {o["qty"]}× {it["name"]}.',
+                     then=lambda d: self._open_units_for(item_id))
+            return
+        dlg = ReceiveDialog(parent, o, it, mode)
+        if dlg.exec_() != QDialog.Accepted: return
+        v = dlg.values()
+        self._do(lambda: self.backend.receive_order(order_id, **v),
+                 f'Received {v["qty"]}× {it["name"]}.')
+
+    def _cancel_order(self, o):
+        reply = QMessageBox.question(self._orders_dlg or self, "Cancel order",
+                                     f'Cancel the order for {o["qty"]}× "{o["item"]}"?',
+                                     QMessageBox.Yes | QMessageBox.No)
+        if reply != QMessageBox.Yes: return
+        order_id = o["id"]
+        self._do(lambda: self.backend.cancel_order(order_id), f'Cancelled order for {o["item"]}.')
 
     def _remove(self):
         it = self._selected_item()
